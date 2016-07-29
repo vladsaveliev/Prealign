@@ -1,0 +1,611 @@
+#!/usr/bin/env python
+
+import os
+import sys
+import datetime
+from optparse import OptionParser, SUPPRESS_HELP
+from os.path import join, isfile, basename, isdir, exists, dirname, splitext, islink
+from collections import OrderedDict, namedtuple
+import subprocess
+import traceback
+
+import multiqc
+from Utils.proc_args import set_up_dirs
+from Utils.bed_utils import verify_bed
+from Utils.call_process import run, file_exists
+from Utils import logger
+from Utils.file_utils import verify_dir, verify_file, safe_mkdir, adjust_path, which, file_transaction
+from Utils.logger import critical, debug, info, send_email, err, warn
+from Utils.utils import is_local, is_az
+from Utils.parallel import ParallelCfg, parallel_view
+import Utils.reference_data as ref
+
+from targqc.Target import Target
+import targqc
+from targqc.summarize import summarize_targqc
+
+import prealign.config as cfg
+from prealign import config
+from prealign.dataset_structure import DatasetStructure
+from prealign.jira_utils import retrieve_jira_info
+from prealign.webserver.exposing import sync_with_ngs_server
+
+
+class Steps:
+    fastqc = True
+    targqc = True
+    metamapping = False
+    expose = True
+
+
+def proc_opts():
+    usage = 'Usage: %prog <DATASET_DIR_LOCATION> <JIRA_URL(S)>' \
+            ' [--bed BED] [--project-name STR]]\n' \
+            '\tNote that DATASET_DIR_LOCATION can be either the root of a Illumina run ' \
+            '(in witch case multiple projects may be detected and processed, or ' \
+            'a specific project in <root>/Unalign/<Project>'
+
+    options = [
+        (['--test'], dict(
+            dest='test',
+            help='Quick test of correct installation.'
+        )),
+        (['--bed', '--capture', '--amplicons'], dict(
+            dest='bed',
+            help='BED file with regions to analyse. If not specified, CDS across full genome will be analysed',
+        )),
+        (['-o', '--output-dir'], dict(
+            dest='output_dir',
+            metavar='DIR',
+            help='Output directory (or directory name in case of bcbio final dir)',
+            default=os.getcwd(),
+         )),
+        (['--project-name'], dict(
+            dest='project_name',
+            help=SUPPRESS_HELP,
+        )),
+        (['-j', '--jira'], dict(
+            dest='jira',
+            help='JIRA case path (goes to the ngs-website)',
+        )),
+        (['--conf'], dict(
+            dest='hiseq4000_conf',
+            help='A csv-file in the form of "subproject_dir_name,sub_project_desired_name,jira_url"',
+        )),
+        (['--samplesheet'], dict(
+            dest='samplesheet',
+            help='Sample sheet (default is located under the dataset root as SampleSheet.csv',
+        )),
+        (['--email'], dict(
+            dest='email',
+            help='E-mail address to send notifications on errors and finished jobs.',
+        )),
+        (['--expose-only'], dict(
+            dest='expose_to_ngs_server_only',
+            action='store_true',
+            default=False,
+            help='Only add project to the webserver',
+        )),
+        (['--no-expose'], dict(
+            dest='expose',
+            action='store_false',
+            default=True,
+            help='Do not expose the reports',
+        )),
+        (['--no-targqc'], dict(
+            dest='targqc',
+            action='store_false',
+            default=True,
+            help='',
+        )),
+        (['--metamapping'], dict(
+            dest='metamapping',
+            action='store_true',
+            default=False,
+            help='',
+        )),
+        (['--no-fastqc'], dict(
+            dest='fastqc',
+            action='store_false',
+            default=True,
+            help='',
+        )),
+        (['-g', '--genome'], dict(
+            dest='genome',
+            help='Genome build (hg19 or hg38), used to pick genome annotation BED file if not specified',
+            default=cfg.genome,
+        )),
+        (['--downsample-pairs-num', '--downsample-to'], dict(
+            dest='downsample_pairs_num',
+            type='int',
+            help='If input is FastQ, select N random read pairs from each input set. '
+                 'Default is ' + str(cfg.downsample_pairs_num) + '. To turn off (align all reads), set --downsample-pairs-num off',
+            default=cfg.downsample_pairs_num,
+         )),
+        (['-t', '--nt', '--threads'], dict(
+            dest='threads',
+            type='int',
+            help='Number of threads'
+         )),
+        (['--reuse'], dict(
+            dest='reuse_intermediate',
+            help='reuse intermediate non-empty files in the work dir from previous run',
+            action='store_true',
+            default=cfg.reuse_intermediate,
+         )),
+        (['-s', '--scheduler'], dict(
+            dest='scheduler',
+            choices=["lsf", "sge", "torque", "slurm", "pbspro"],
+            help="Scheduler to use for ipython parallel"
+         )),
+        (["-q", "--queue"], dict(
+            dest='queue',
+            help="Scheduler queue to run jobs on, for ipython parallel"
+         )),
+        (["-r", "--resources"], dict(
+            dest='resources',
+            help=("Cluster specific resources specifications. "
+              "Can be specified multiple times.\n"
+              "Supports SGE, Torque, LSF and SLURM "
+              "parameters."),
+            default=[],
+            action="append")),
+
+        (['--no-dedup'], dict(
+            dest='no_dedup',
+            action='store_true',
+            default=not cfg.dedup,
+            help=SUPPRESS_HELP,
+         )),
+        (['--debug'], dict(
+            dest='debug',
+            action='store_true',
+            default=cfg.is_debug,
+            help=SUPPRESS_HELP,
+         )),
+        (['--work-dir'], dict(dest='work_dir', metavar='DIR', help=SUPPRESS_HELP)),
+        (['--log-dir'], dict(dest='log_dir', metavar='DIR', help=SUPPRESS_HELP)),
+    ]
+
+    parser = OptionParser(description='Pre-process and QC Illumina run directory')
+    parser.set_usage(usage)
+    for args, kwargs in options:
+        parser.add_option(*args, **kwargs)
+    opts, args = parser.parse_args()
+
+    cfg.is_debug = logger.is_debug = opts.debug
+    cfg.reuse_intermediate = opts.reuse_intermediate
+
+    # Reading inputs
+    if len(args) < 1:
+        critical(usage)
+    dataset_dirpath = verify_dir(args[0], is_critical=True, description='Dataset directory')  # /ngs/oncology/datasets/hiseq/150521_D00443_0159_AHK2KTADXX
+    if opts.work_dir:
+        cfg.is_debug = logger.is_debug = True
+    output_dir, work_dir = set_up_dirs('prealign', output_dir=dataset_dirpath, work_dir=opts.work_dir,
+                                       log_dir=opts.log_dir, reuse_intermediate=opts.reuse_intermediate)
+    try:
+        subprocess.call(['chmod', '-R', '777', work_dir])
+    except OSError:
+        debug(traceback.format_exc())
+        pass
+
+    jira_url = ''
+    if len(args) > 1:
+        jira_url = args[1]
+
+    samplesheet = None
+    if opts.samplesheet:
+        info('Using custom sample sheet ' + opts.samplesheet)
+        samplesheet = verify_file(opts.samplesheet, is_critical=True)
+
+    info(' '.join(sys.argv))
+    info()
+    debug('Created a temporary working directory: ' + work_dir)
+
+    if opts.project_name:
+        info('Project name: ' + opts.project_name)
+
+    bed_fpath = None
+    if opts.bed:
+        bed_fpath = verify_bed(opts.bed, 'BED')
+        debug('Using BED ' + bed_fpath)
+
+    hiseq4000_conf = None
+    if opts.hiseq4000_conf:
+        hiseq4000_conf = verify_file(opts.hiseq4000_conf, 'HiSeq4000 conf file')
+        debug('Using conf file for HiSeq4000 run: ' + bed_fpath)
+
+    if opts.expose_to_ngs_server_only:
+        Steps.fastqc = Steps.metamapping = Steps.targqc = False
+    else:
+        Steps.fastqc = opts.fastqc
+        Steps.metamapping = opts.metamapping
+        Steps.targqc = opts.targqc
+        Steps.expose = opts.expose
+
+    # Parallel configuration and genomes; TODO: make it nicer; probably use "cnf"-like class like before, and not import it
+    cfg.genome = opts.genome
+    cfg.sys_cfg = config.load_sys_cfg(opts.genome)
+    cfg.sys_cfg['scheduler'] = cfg.sys_cfg.get('scheduler', opts.scheduler)
+    cfg.sys_cfg['queue']     = cfg.sys_cfg.get('queue',     opts.scheduler)
+    cfg.sys_cfg['resources'] = cfg.sys_cfg.get('resources', opts.scheduler)
+
+    tag = ('preproc_' + opts.project_name) if opts.project_name else 'preproc'
+    cfg.parallel_cfg = ParallelCfg(cfg.sys_cfg['scheduler'], cfg.sys_cfg['queue'],
+                                   cfg.sys_cfg['resources'], opts.threads, tag)
+
+    return dataset_dirpath, work_dir, jira_url, opts.project_name, samplesheet, bed_fpath, hiseq4000_conf
+
+
+def read_hiseq4000_conf(conf_fpath):
+    projectname_by_subproject = dict()
+    jira_by_subproject = dict()
+    bed_by_subproject = dict()
+    if verify_file(conf_fpath, is_critical=True, description='HiSeq4000 jira/subproject configuration file'):
+        with open(conf_fpath) as f:
+            for i, l in enumerate(f):
+                l = l.strip()
+                if not l.startswith('#'):
+                    fs = l.split(',')
+                    if not len(fs) == 4:
+                        critical('A line in ' + conf_fpath + ' should contain 4 comma-separated values (empty allowed) '
+                                 '(dirname, project name, jira url, bed path). Malformed line #' + str(i) + ': ' + l)
+                    projectname_by_subproject[fs[0]] = fs[1]
+                    jira_by_subproject[fs[0]] = fs[2]
+                    bed_by_subproject[fs[0]] = fs[3]
+    if len(projectname_by_subproject) == 0:
+        critical('No records in ' + conf_fpath)
+    assert len(projectname_by_subproject) == len(jira_by_subproject) == len(bed_by_subproject), \
+        str(len(projectname_by_subproject)) + ', ' + str(len(jira_by_subproject) + ', ' + str(len(bed_by_subproject)))
+    return projectname_by_subproject, jira_by_subproject, bed_by_subproject
+
+
+def parse_jira_case(jira_url):
+    jira_case = None
+    if is_az() and jira_url:
+        info('Getting info from JIRA...')
+        jira_case = retrieve_jira_info(jira_url)
+    return jira_case
+
+
+def main():
+    project_dirpath, work_dir, jira_url, project_name, samplesheet, bed_fpath, hiseq4000_conf = proc_opts()
+    prjname_by_subprj, jira_by_subprj, bed_by_subprj = {'': project_name or ''}, {'': jira_url}, {'': bed_fpath}
+    if hiseq4000_conf:
+        prjname_by_subprj, jira_by_subprj, bed_by_subprj = read_hiseq4000_conf(hiseq4000_conf)
+
+    jira_case_by_subprj = dict()
+    for subprj, jira_url in jira_by_subprj.items():
+        jira_case_by_subprj[subprj] = parse_jira_case(jira_url)
+        if not prjname_by_subprj[subprj] and jira_case_by_subprj[subprj]:
+            prjname_by_subprj[subprj] = jira_case_by_subprj[subprj].project_name
+            info('Setting project name from JIRA: ' + prjname_by_subprj[subprj])
+        if not prjname_by_subprj[subprj]:
+            critical('Cannot parse JIRA url ' + str(jira_url) +
+               ', and project name is not specified in the config or command line. Please, provide a project name.')
+        prjname_by_subprj[subprj] = prjname_by_subprj[subprj].replace(' ', '_')
+        info('Project name and JIRA URL for "' + subprj + '": ' + prjname_by_subprj[subprj] + ', ' + str(jira_url))
+
+    info()
+    info('*' * 60)
+    ds = DatasetStructure.create(work_dir, project_dirpath, prjname_by_subprj, samplesheet)
+    if not ds.project_by_name:
+        critical('Error: no projects found')
+    info('Projects: ' + ', '.join([p.name + ' (' + ', '.join(p.sample_by_name) + ')' for p in ds.project_by_name.values()]))
+    for project in ds.project_by_name.values():
+        if not project.sample_by_name:
+            critical('Error: no samples for project ' + project.name + ' found')
+        if len(ds.project_by_name) > 1 and project.name not in jira_case_by_subprj:
+            critical('Error: ' + project.name + 'could not be found in config ' + str(hiseq4000_conf))
+
+    for project in ds.project_by_name.values():
+        samples = project.sample_by_name.values()
+        threads = len(samples)
+        info('Threads number: ' + str(threads))
+        project.concat_fastqs(ds.get_fastq_regexp_fn)
+
+        if Steps.fastqc:
+            info('Making FastQC reports')
+            safe_mkdir(project.fastqc_dirpath)
+            make_fastqc_reports(work_dir, samples, project.fastq_dirpath, project.fastqc_dirpath, project.comb_fastqc_fpath)
+
+        if Steps.targqc:
+            info('Running TargQC for downsamled reads')
+            bed_fpath = bed_by_subprj.get(project.name, bed_by_subprj.values()[0] if bed_by_subprj.values() else None)
+            run_targqc(work_dir, project, samples, bed_fpath)
+
+        if Steps.metamapping:
+            info()
+            info('Metamapping for contamination')
+            safe_mkdir(ds.downsample_metamapping_dirpath)
+            run_metamapping(samples, project.downsample_metamapping_dirpath)
+
+        new_project_symlink = join(dirname(project_dirpath), project.az_project_name)
+        if not exists(new_project_symlink):
+            info()
+            info('Creating symlink in Datasets now called as project-name: ' + project_dirpath + ' -> ' + new_project_symlink)
+            os.symlink(project_dirpath, new_project_symlink)
+
+        # Creating analysis directory
+        __prepare_analysis_directory(work_dir, project.az_project_name, project_dirpath, samples)
+
+        # Making project-level report
+        # make_project_level_report(cnf, dataset_structure=ds, dataset_project=project)
+
+        # Exposing
+        info()
+        info('Syncing with the NGS webserver')
+        html_report_url = sync_with_ngs_server(
+            work_dir,
+            jira_url=jira_by_subprj.get(project.name, jira_by_subprj.values()[0] if jira_by_subprj.values() else 'unreached'),
+            project_name=project.az_project_name,
+            sample_names=[s.name for s in samples],
+            dataset_dirpath=project_dirpath,
+            summary_report_fpath=project.project_report_html_fpath,
+            jira_case=jira_case_by_subprj.get(project.name, jira_case_by_subprj.values()[0] if jira_case_by_subprj.values() else None)
+        )
+
+            # FastQC
+            # symlink_to_ngs(project_dirpath, NGS_WEBSERVER_PREPROC_DIR)
+
+            # if symlink_to_ngs(comb_fastqc_fpath, ngs_webserver_project_dirpath) is None:
+            #     err('Error: cannot connect to the ngs server and make symlinks')
+            # else:
+            #     # BaseCalls
+            #     basecall_stats_dirnames = [fname for fname in os.listdir(basecalls_dirpath) if fname.startswith('Basecall_Stats_')]
+            #     if len(basecall_stats_dirnames) > 1:
+            #         err('More than 1 Basecall_Stats_* dirs found in unalign_dirpath')
+            #     if len(basecall_stats_dirnames) == 0:
+            #         err('No Basecall_Stats_* dirs found in unalign_dirpath')
+            #     if len(basecall_stats_dirnames) == 1:
+            #         basecall_stats_dirpath = join(basecalls_dirpath, basecall_stats_dirnames[0])
+            #         fpaths = filter(None, (verify_file(join(basecall_stats_dirpath, html_fname)
+            #             for html_fname in ['Demultiplex_Stats.htm', 'All.htm', 'IVC.htm'])))
+            #         symlink_to_ngs(fpaths, ngs_webserver_project_dirpath)
+            #
+            #     # Sample sheet
+            #     symlink_to_ngs(sample_sheet_csv_fpath, ngs_webserver_project_dirpath)
+            #
+            #     # TargQC downsampled
+            #     symlink_to_ngs(targqc_html_fpath, ngs_webserver_project_dirpath)
+
+            # jira_case = None
+            # if jira_url:
+            #     # Add to the NGS list
+            #     jira_case = retrieve_jira_info(jira_url)
+            #
+            # sync_with_ngs_server(cnf, jira_case=jira_case,
+            #     project_name=cnf.project_name, sample_names=[s.name for s in samples])
+
+        subj = project.project_report_html_fpath or project.name
+        txt = 'Preproc finished for ' + project.name + '\n'
+        txt += '\n'
+        txt += 'Path: ' + project.dirpath + '\n'
+        txt += 'Report: ' + str(html_report_url) + '\n'
+        if jira_url:
+            txt += 'Jira: ' + jira_url
+        send_email(txt, subj)
+
+    info()
+    info('*' * 70)
+    # if not cnf.debug and cnf.work_dir:
+    #     try:
+    #         shutil.rmtree(cnf.work_dir)
+    #     except OSError:
+    #         err('Can\'t remove work directory ' + cnf.work_dir + ', please, remove it manually.')
+
+def run_metamapping(samples, output_dirpath):
+    info('Running MetaMapping for downsampled BAMs: not implemented')
+
+
+
+def run_targqc(work_dir, project, samples, bed_fpath):
+    targqc_work_dir = join(work_dir, 'targqc')
+
+    # target = Target(work_dir, cfg.fai_fpath, cfg.reuse_intermediate, bed_fpath)
+    # info()
+    # start_targqc(work_dir, samples, target)
+
+    fai_fpath = ref.get_fai(cfg.genome)
+    target = Target(work_dir, fai_fpath, cfg.reuse_intermediate, bed_fpath, genome=cfg.genome)
+    samples = [targqc.Sample(s.name,
+                             dirpath=safe_mkdir(join(project.downsample_targqc_dirpath, s.name)),
+                             work_dir=safe_mkdir(join(targqc_work_dir, s.name)),
+                             l_fpath=s.l_fpath,
+                             r_fpath=s.r_fpath)
+               for s in samples]
+    targqc.start_targqc(work_dir, samples, target,
+                        parallel_cfg=cfg.parallel_cfg,
+                        bwa_prefix=cfg.sys_cfg['genome']['bwa'],
+                        genome=cfg.genome,
+                        downsample_pairs_num=cfg.downsample_pairs_num,
+                        dedup=cfg.dedup,
+                        reuse=cfg.reuse_intermediate,
+                        is_debug=cfg.is_debug)
+    summarize_targqc(cfg.parallel_cfg.threads, project.downsample_targqc_dirpath,
+                            targqc_work_dir, samples, bed_fpath=bed_fpath)
+
+    # cmdl = (('targqc ' + ' '.join(s.l_fpath + ' ' + s.r_fpath for s in samples) +
+    #     ' --work-dir {targqc_work_dir} --project-name {project.name} ' +
+    #     ' -o {project.downsample_targqc_dirpath} --genome {genome} --bwa-prefix {bwa}').format(**locals()))
+    # if bed_fpath:
+    #     cmdl += ' --bed ' + bed_fpath
+    # safe_mkdir(project.downsample_targqc_dirpath)
+    # if cfg.reuse_intermediate:
+    #     cmdl += ' --reuse'
+    # if cfg.parallel_cfg.scheduler:
+    #     cmdl += ' --scheduler ' + cfg.parallel_cfg.scheduler
+    # if cfg.parallel_cfg.queue:
+    #     cmdl += ' --queue ' + cfg.parallel_cfg.queue
+    # if cfg.parallel_cfg.threads:
+    #     cmdl += ' -t ' + str(cfg.parallel_cfg.threads)
+    # if cfg.parallel_cfg.extra_params:
+    #     cmdl += ' '.join((' --resources ' + k + '=' + v) for k, v in cfg.parallel_cfg.extra_params.items())
+
+    # run(cmdl)
+
+    verify_file(project.downsample_targqc_report_fpath, is_critical=True)
+    return project.downsample_targqc_report_fpath
+
+    # samples = [TargQCSample(
+    #     s.name,
+    #     output_dir=join(targqc_dirpath, s.name),
+    #     bed=cnf.bed,
+    #     bam=bam_by_sample[s.name])
+    #            for s in samples]
+
+    # Parallel(n_jobs=threads)(delayed(make_targetseq_reports(
+    #     CallCnf(cnf.__dict__), sample.dirpath, sample,
+    #     sample.bam, exons_bed, exons_no_genes_bed, target_bed
+    # )(CallCnf(cnf.__dict__), sample) for sample in samples))
+    #
+    # return summarize_targqc(cnf, 1, targqc_dirpath, samples, bed_fpath, exons_bed)
+
+
+def run_fastqc(work_dir, fastq_fpath, output_basename, fastqc_dirpath, need_downsample=True):
+    fastqc = which('fastqc')
+    java = which('java')
+    tmp_dirpath = join(work_dir, 'FastQC_' + output_basename + '_tmp')
+    safe_mkdir(tmp_dirpath)
+    fastq_html_fpath = join(fastqc_dirpath, output_basename + '_fastqc', 'fastqc_report.html')
+    if cfg.reuse_intermediate and isfile(fastq_html_fpath) and verify_file(fastq_html_fpath):
+        debug(fastq_html_fpath + ' exists, reusing')
+        return fastq_html_fpath
+    cmdline_l = '{fastqc} --dir {tmp_dirpath} --extract -o {fastqc_dirpath} -f fastq -j {java} {fastq_fpath}'.format(**locals())
+    run(cmdline_l)
+    return verify_file(fastq_html_fpath, 'FastQC html report')
+
+
+# def run_fastqc(cnf, sample, fastqc_dirpath, need_downsample=True):
+#     # with tx_tmpdir(fastqc_work_dir, fastqc_dirpath) as fastqc_out_tx_dirpath:
+#     # cmdline = get_script_cmdline(cnf, 'python', join('scripts', 'pre', 'fastqc.py'))
+#     # cmdline += (' --sys-cnf {cnf.sys_cnf} --sample {sample.name} -1 {sample.l_fpath} -2 {sample.r_fpath} -o {fastqc_dirpath}'.format(**locals()))
+#     fastqc = get_system_path(cnf, 'fastqc', is_critical=True)
+#     java = get_system_path(cnf, 'java', is_critical=True)
+#     cmdline_l = '{fastqc} --extract -o {fastqc_dirpath} -f fastq -j {java} {sample.l_fpath}'.format(**locals())
+#     cmdline_r = '{fastqc} --extract -o {fastqc_dirpath} -f fastq -j {java} {sample.r_fpath}'.format(**locals())
+#     j_l = submit_job(cnf, cmdline_l, 'FastQC_' + sample.l_fastqc_base_name, stdout_to_outputfile=False,
+#         output_fpath=join(sample.fastqc_dirpath, sample.l_fastqc_base_name + '_fastqc', 'fastqc_report.html'))
+#     j_r = submit_job(cnf, cmdline_r, 'FastQC_' + sample.r_fastqc_base_name, stdout_to_outputfile=False,
+#         output_fpath=join(sample.fastqc_dirpath, sample.r_fastqc_base_name + '_fastqc', 'fastqc_report.html'))
+#
+#     return j_l, j_r
+
+    # parser = FastQCParser(fastqc_out, data["name"][-1])
+    # stats = parser.get_fastqc_summary()
+    # parser.save_sections_into_file()
+
+
+def find_fastq_pairs_by_sample_names(fastq_fpaths, sample_names):
+    fastq_by_sn = OrderedDict()
+
+    for sn in sample_names:
+        sn_fastq_fpaths = sorted([f for f in fastq_fpaths if basename(f).startswith(sn + '_R')])
+        if len(sn_fastq_fpaths) == 0:
+            err('Error: no fastq found for ' + sn)
+            fastq_by_sn[sn] = None
+        elif len(sn_fastq_fpaths) > 2:
+            critical('Error: more than 2 fastq files starting with ' + sn + '_R: ' + ', '.join(sn_fastq_fpaths))
+        elif len(sn_fastq_fpaths) == 1:
+            warn('Warning: only single fastq file is found for ' + sn + '. Treating as single reads.')
+            fastq_by_sn[sn] = [verify_file(sn_fastq_fpaths[0], description='sn_fastq_fpaths[0] for ' + str(sn)), None]
+        else:
+            fastq_by_sn[sn] = [verify_file(fpath, description='fpath from sn_fastq_fpaths for ' + str(sn)) for fpath in sn_fastq_fpaths]
+
+    return fastq_by_sn
+
+
+class FQC_Sample:
+    def __init__(self, name, fastq_fpath, sample):
+        self.name = name
+        self.fastq_fpath = fastq_fpath
+        self.sample = sample
+        self.fastqc_html_fpath = sample.find_fastqc_html(name)
+
+
+def make_fastqc_reports(work_dir, samples, fastq_dirpath, fastqc_dirpath, comb_fastqc_fpath):
+    fastqc = which('fastqc')
+    if not fastqc:
+        err('FastQC is not found, cannot make reports')
+        return None
+
+    else:
+        safe_mkdir(fastqc_dirpath)
+
+        fqc_samples = []
+        for s in samples:
+            fqc_samples.extend([
+                FQC_Sample(name=s.l_fastqc_base_name, fastq_fpath=s.l_fpath, sample=s),
+                FQC_Sample(name=s.r_fastqc_base_name, fastq_fpath=s.r_fpath, sample=s)])
+
+        with parallel_view(len(fqc_samples), cfg.parallel_cfg) as view:
+            fastq_reports_fpaths = view.run(run_fastqc, [
+                [work_dir, s.fastq_fpath, s.name, fastqc_dirpath, cfg.reuse_intermediate] for s in fqc_samples])
+
+        for fqc_s, fqc_html_fpath in zip(fqc_samples, fastq_reports_fpaths):
+            if not fqc_html_fpath:
+                err('FastQC report for ' + fqc_s.name + ' not found')
+            sample_fastqc_dirpath = join(fastqc_dirpath, fqc_s.name + '_fastqc')
+            if isfile(sample_fastqc_dirpath + '.zip'):
+                try:
+                    os.remove(sample_fastqc_dirpath + '.zip')
+                except OSError:
+                    pass
+
+
+def __prepare_analysis_directory(work_dir, project_name, project_dirpath, samples):
+    kind = next((kind for pref, kind in cfg.project_kind_by_prefix.items() if project_name.startswith(pref)), None)
+    if kind:
+        analysis_proj_dirpath = adjust_path(join(adjust_path(project_dirpath).split('/Datasets/')[0], 'Analysis', kind, project_name))
+        if not exists(analysis_proj_dirpath):
+            info('Analysis directory ' + analysis_proj_dirpath + ' does not exist. Creating and preparing...')
+            safe_mkdir(analysis_proj_dirpath)
+
+            bcbio_csv_fpath = join(analysis_proj_dirpath, 'bcbio.csv')
+            if not isfile(bcbio_csv_fpath):
+                with file_transaction(work_dir, bcbio_csv_fpath) as tx:
+                    with open(tx, 'w') as f:
+                        f.write('samplename,description,batch,phenotype\n')
+                        for s in samples:
+                            f.write(s.name + ',' + s.name + ',' + s.name + '-batch,tumor\n')
+
+        ds_symlink = join(analysis_proj_dirpath, 'dataset')
+        if isdir(analysis_proj_dirpath) and not exists(ds_symlink):
+            info('Creating symlink in analysis to datasets: ' + project_dirpath + ' -> ' + ds_symlink)
+            os.symlink(project_dirpath, ds_symlink)
+
+
+if __name__ == '__main__':
+    main()
+
+
+'''
+#!/bin/bash/
+
+#Takes 2 arguements, data_loc and project_name, as created in datasets, such as hiseq and Dev_0200_HiSeq_DS
+#Usage - upload_seqQC.sh hiseq Dev_0200_HiSeq_DS https://jira.rd.astrazeneca.net/browse/NGSG-313
+#Usage - upload_seqQC.sh bioscience Bio_0041_IDT_RR_DS
+
+datasets=/ngs/oncology/datasets
+data_loc=$1
+project_name=$2
+
+cd /opt/lampp/htdocs/seqQC/
+#echo "In /opt/lampp/htdocs/seqQC on NGS Server"
+echo " "
+
+mkdir $project_name
+cd $project_name
+mkdir FastQC
+
+echo "Demultiplex Report linked!"
+echo " "
+
+echo "SampleSheet linked!"
+echo "DONE!"
+echo " "
+
+'''
+
+

@@ -332,6 +332,9 @@ def main():
 
         # Making project-level report
         # make_project_level_report(cnf, dataset_structure=ds, dataset_project=project)
+        info('Making MultiQC reports')
+        cmdl = 'multiqc -f ' + project_dirpath + ' -o ' + project_dirpath
+        run(cmdl)
 
         # Exposing
         info()
@@ -345,38 +348,6 @@ def main():
             summary_report_fpath=project.project_report_html_fpath,
             jira_case=jira_case_by_subprj.get(project.name, jira_case_by_subprj.values()[0] if jira_case_by_subprj.values() else None)
         )
-
-            # FastQC
-            # symlink_to_ngs(project_dirpath, NGS_WEBSERVER_PREPROC_DIR)
-
-            # if symlink_to_ngs(comb_fastqc_fpath, ngs_webserver_project_dirpath) is None:
-            #     err('Error: cannot connect to the ngs server and make symlinks')
-            # else:
-            #     # BaseCalls
-            #     basecall_stats_dirnames = [fname for fname in os.listdir(basecalls_dirpath) if fname.startswith('Basecall_Stats_')]
-            #     if len(basecall_stats_dirnames) > 1:
-            #         err('More than 1 Basecall_Stats_* dirs found in unalign_dirpath')
-            #     if len(basecall_stats_dirnames) == 0:
-            #         err('No Basecall_Stats_* dirs found in unalign_dirpath')
-            #     if len(basecall_stats_dirnames) == 1:
-            #         basecall_stats_dirpath = join(basecalls_dirpath, basecall_stats_dirnames[0])
-            #         fpaths = filter(None, (verify_file(join(basecall_stats_dirpath, html_fname)
-            #             for html_fname in ['Demultiplex_Stats.htm', 'All.htm', 'IVC.htm'])))
-            #         symlink_to_ngs(fpaths, ngs_webserver_project_dirpath)
-            #
-            #     # Sample sheet
-            #     symlink_to_ngs(sample_sheet_csv_fpath, ngs_webserver_project_dirpath)
-            #
-            #     # TargQC downsampled
-            #     symlink_to_ngs(targqc_html_fpath, ngs_webserver_project_dirpath)
-
-            # jira_case = None
-            # if jira_url:
-            #     # Add to the NGS list
-            #     jira_case = retrieve_jira_info(jira_url)
-            #
-            # sync_with_ngs_server(cnf, jira_case=jira_case,
-            #     project_name=cnf.project_name, sample_names=[s.name for s in samples])
 
         subj = project.project_report_html_fpath or project.name
         txt = 'Preproc finished for ' + project.name + '\n'

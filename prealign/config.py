@@ -2,7 +2,8 @@ import socket
 from contextlib import contextmanager
 from os.path import abspath, expanduser, join, dirname, pardir
 from traceback import format_exc
-from Utils import logger
+
+from Utils.config import load_yaml_config
 from Utils.logger import info, err, critical, debug, warn
 from Utils.file_utils import verify_file, verify_module, adjust_path
 from Utils.utils import is_uk, is_us, is_cloud, is_sweden, is_ace, is_china, is_local
@@ -26,7 +27,6 @@ sys_cnfs = dict(
     local = join(configs_dirpath, 'system_info_local.yaml'),
 )
 
-threads = 1
 downsample_pairs_num = 5e5
 genome = 'hg19'
 fai_fpath = None
@@ -48,23 +48,12 @@ project_kind_by_prefix = {
 
 def load_sys_cfg(genome_build):
     sys_cfg_fpath = verify_file(_detect_sys_cnf_by_location(), is_critical=True)
-    sys_cfg = _load_yaml_config(sys_cfg_fpath)
-    if genome_build not in sys_cfg['genomes']:
+    sys_cfg_ = load_yaml_config(sys_cfg_fpath)
+    if genome_build not in sys_cfg_['genomes']:
         critical(genome_build + ' is not supported')
-    sys_cfg['genome'] = sys_cfg['genomes'][genome_build]
-    sys_cfg['genome']['name'] = genome_build
-    return sys_cfg
-
-
-def _load_yaml_config(fpath):
-    verify_file(fpath, is_critical=True)
-    try:
-        dic = load_yaml(open(fpath), Loader=Loader)
-    except:
-        err(format_exc())
-        critical('Could not parse bcbio YAML ' + fpath)
-    else:
-        return dic
+    sys_cfg_['genome'] = sys_cfg_['genomes'][genome_build]
+    sys_cfg_['genome']['name'] = genome_build
+    return sys_cfg_
 
 
 def _detect_sys_cnf_by_location():
@@ -88,23 +77,6 @@ def _detect_sys_cnf_by_location():
     return res
 
 
-def _fill_dict_from_defaults(cur_cnf, defaults_dict):
-    for key in defaults_dict:
-        if key in cur_cnf:
-            if isinstance(cur_cnf[key], dict) and isinstance(defaults_dict[key], dict):
-                _fill_dict_from_defaults(cur_cnf[key], defaults_dict[key])
-        else:
-            cur_cnf[key] = defaults_dict[key]
-    return cur_cnf
-
-
-def _join_parent_conf(child_conf, parent_conf):
-    bc = parent_conf.copy()
-    bc.update(child_conf)
-    child_conf.update(bc)
-    return child_conf
-
-
 @contextmanager
 def with_cnf(cnf, **kwargs):
     prev_opts = {k: cnf[k] for k in kwargs.keys()}
@@ -115,4 +87,3 @@ def with_cnf(cnf, **kwargs):
     finally:
         for k, v in prev_opts.items():
             cnf[k] = v
-

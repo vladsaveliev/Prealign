@@ -22,14 +22,13 @@ def _run(_cmd):
     print('$ ' + _cmd)
     os.system(_cmd)
 
-if sys.argv[-1] == 'publish':
-    _run('python setup.py sdist upload')
-    _run('python setup.py bdist_wheel upload')
-    sys.exit()
-
 if sys.argv[-1] == 'tag':
     _run('git tag -a %s -m "Version %s"' % (version, version))
     _run("git push --tags")
+    sys.exit()
+
+if sys.argv[-1] == 'up':
+    _run('git up')
     sys.exit()
 
 if sys.argv[-1] == 'install':

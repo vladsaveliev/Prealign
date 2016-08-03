@@ -1,4 +1,5 @@
 targqc
+Utils
 joblib
 ipython<5.0.0,>=4.0.0
 ipython-cluster-helper

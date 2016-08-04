@@ -384,13 +384,22 @@ class DatasetSample:
         self.name = re.sub(r'[\W_]', r'_', name)
         self.index = index
 
+        self.fastq_dirpath = None
+        self.source_fastq_dirpath = source_fastq_dirpath
         self.l_fpath = None
         self.r_fpath = None
+
+        self.fastqc_dirpath = None
+        self.l_fastqc_base_name = None
+        self.r_fastqc_base_name = None
+        self.l_fqc_sample = None
+        self.r_fqc_sample = None
 
         self.lane_numbers = set()
         self.fcid = None  # for HiSeq
 
-        self.source_fastq_dirpath = source_fastq_dirpath
+        self.targqc_sample = None
+        self.downsample_targqc_dirpath = None
 
     def set_up_out_dirs(self, fastq_dirpath, fastqc_dirpath, downsample_targqc_dirpath, work_dir):
         self.fastq_dirpath = fastq_dirpath
@@ -400,30 +409,18 @@ class DatasetSample:
         self.l_fpath = join(fastq_dirpath, self.name + '_R1.fastq.gz')
         self.r_fpath = join(fastq_dirpath, self.name + '_R2.fastq.gz')
 
-        self.sample_fastqc_dirpath = join(fastqc_dirpath, self.name + '.fq_fastqc')
-        self.fastqc_html_fpath = join(fastqc_dirpath, self.name + '.fq_fastqc.html')
+        # self.sample_fastqc_dirpath = join(fastqc_dirpath, self.name + '.fq_fastqc')
+        # self.fastqc_html_fpath = join(fastqc_dirpath, self.name + '.fq_fastqc.html')
         self.l_fastqc_base_name = splitext_plus(basename(self.l_fpath))[0]
         self.r_fastqc_base_name = splitext_plus(basename(self.r_fpath))[0]
         # self.l_fastqc_html_fpath = None  # join(ds.fastqc_dirpath,  + '_fastqc.html')
         # self.r_fastqc_html_fpath = None  # join(ds.fastqc_dirpath, splitext_plus(self.r_fpath)[0] + '_fastqc.html')
 
-        if not isfile(self.fastqc_html_fpath):
-            self.fastqc_html_fpath = join(self.sample_fastqc_dirpath, 'fastqc_report.html')
+        # if not isfile(self.fastqc_html_fpath):
+        #     self.fastqc_html_fpath = join(self.sample_fastqc_dirpath, 'fastqc_report.html')
 
-        self.targqc_sample = targqc.Sample(self.name, join(downsample_targqc_dirpath, self.name), work_dir)
-        self.targqc_html_fpath = self.targqc_sample.targqc_html_fpath
-
-    def find_fastqc_html(self, end_name):
-        sample_fastqc_dirpath = join(self.fastqc_dirpath, end_name + '_fastqc')
-        fastqc_html_fpath = join(self.fastqc_dirpath, end_name + '_fastqc.html')
-        if isfile(fastqc_html_fpath):
-            return fastqc_html_fpath
-        else:
-            fastqc_html_fpath = join(sample_fastqc_dirpath, 'fastqc_report.html')
-            if isfile(fastqc_html_fpath):
-                return fastqc_html_fpath
-            else:
-                return None
+        # self.targqc_sample = targqc.Sample(self.name, join(downsample_targqc_dirpath, self.name), work_dir)
+        # self.targqc_html_fpath = self.targqc_sample.targqc_html_fpath
 
     def find_raw_fastq(self, get_regexp, suf='R1'):
         fastq_fpaths = [

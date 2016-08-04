@@ -9,7 +9,6 @@ from collections import OrderedDict, namedtuple
 import subprocess
 import traceback
 
-import multiqc
 from Utils.proc_args import set_up_dirs
 from Utils.bed_utils import verify_bed
 from Utils.call_process import run, file_exists
@@ -305,15 +304,18 @@ def main():
         info('Threads number: ' + str(threads))
         project.concat_fastqs(ds.get_fastq_regexp_fn)
 
+        read_pairs_num_by_sample = dict()
         if Steps.fastqc:
             info('Making FastQC reports')
             safe_mkdir(project.fastqc_dirpath)
             make_fastqc_reports(work_dir, samples, project.fastq_dirpath, project.fastqc_dirpath, project.comb_fastqc_fpath)
+            for s in samples:
+                read_pairs_num_by_sample[s.name] = get_read_pairs_num_from_fastqc(s.l_fqc_sample.fastqc_txt_fpath)
 
         if Steps.targqc:
             info('Running TargQC for downsamled reads')
             bed_fpath = bed_by_subprj.get(project.name, bed_by_subprj.values()[0] if bed_by_subprj.values() else None)
-            run_targqc(work_dir, project, samples, bed_fpath)
+            run_targqc(work_dir, project, samples, bed_fpath, read_pairs_num_by_sample)
 
         if Steps.metamapping:
             info()
@@ -366,12 +368,23 @@ def main():
     #     except OSError:
     #         err('Can\'t remove work directory ' + cnf.work_dir + ', please, remove it manually.')
 
+
+def get_read_pairs_num_from_fastqc(l_fastqc_txt_fpath):
+    num_reads = 0
+    with open(l_fastqc_txt_fpath) as f_in:
+        for line in f_in:
+            if 'total sequences' in line.lower():
+                num_reads += int(line.strip().split('\t')[-1])
+                break
+    return num_reads
+
+
 def run_metamapping(samples, output_dirpath):
     info('Running MetaMapping for downsampled BAMs: not implemented')
 
 
 
-def run_targqc(work_dir, project, samples, bed_fpath):
+def run_targqc(work_dir, project, samples, bed_fpath, read_pairs_num_by_sample):
     targqc_work_dir = join(work_dir, 'targqc')
 
     # target = Target(work_dir, cfg.fai_fpath, cfg.reuse_intermediate, bed_fpath)
@@ -391,8 +404,9 @@ def run_targqc(work_dir, project, samples, bed_fpath):
                         downsample_pairs_num=cfg.downsample_pairs_num,
                         dedup=cfg.dedup,
                         reuse=cfg.reuse_intermediate,
-                        is_debug=cfg.is_debug)
-    
+                        is_debug=cfg.is_debug,
+                        num_reads_by_sample=read_pairs_num_by_sample)
+
     summarize_targqc(cfg.parallel_cfg.threads, project.downsample_targqc_dirpath,
                             targqc_work_dir, samples, bed_fpath=bed_fpath)
 
@@ -487,11 +501,25 @@ def find_fastq_pairs_by_sample_names(fastq_fpaths, sample_names):
 
 
 class FQC_Sample:
-    def __init__(self, name, fastq_fpath, sample):
-        self.name = name
+    def __init__(self, fqc_sample_name, fastq_fpath, sample):
+        self.name = fqc_sample_name
         self.fastq_fpath = fastq_fpath
         self.sample = sample
-        self.fastqc_html_fpath = sample.find_fastqc_html(name)
+        self.fastqc_html_fpath = self.find_fastqc_html()
+        self.fastqc_dirpath = None
+        self.fastqc_txt_fpath = None
+
+    def find_fastqc_html(self):
+        sample_fastqc_dirpath = join(self.sample.fastqc_dirpath, self.name + '_fastqc')
+        fastqc_html_fpath = join(self.sample.fastqc_dirpath, self.name + '_fastqc.html')
+        if isfile(fastqc_html_fpath):
+            return fastqc_html_fpath
+        else:
+            fastqc_html_fpath = join(sample_fastqc_dirpath, 'fastqc_report.html')
+            if isfile(fastqc_html_fpath):
+                return fastqc_html_fpath
+            else:
+                return None
 
 
 def make_fastqc_reports(work_dir, samples, fastq_dirpath, fastqc_dirpath, comb_fastqc_fpath):
@@ -505,23 +533,35 @@ def make_fastqc_reports(work_dir, samples, fastq_dirpath, fastqc_dirpath, comb_f
 
         fqc_samples = []
         for s in samples:
-            fqc_samples.extend([
-                FQC_Sample(name=s.l_fastqc_base_name, fastq_fpath=s.l_fpath, sample=s),
-                FQC_Sample(name=s.r_fastqc_base_name, fastq_fpath=s.r_fpath, sample=s)])
+            s.l_fqc_sample = FQC_Sample(fqc_sample_name=s.l_fastqc_base_name, fastq_fpath=s.l_fpath, sample=s)
+            s.r_fqc_sample = FQC_Sample(fqc_sample_name=s.r_fastqc_base_name, fastq_fpath=s.r_fpath, sample=s)
+            fqc_samples.extend([s.l_fqc_sample, s.r_fqc_sample])
 
-        with parallel_view(len(fqc_samples), cfg.parallel_cfg) as view:
+        with parallel_view(len(fqc_samples), cfg.parallel_cfg, work_dir) as view:
             fastq_reports_fpaths = view.run(run_fastqc, [
-                [work_dir, s.fastq_fpath, s.name, fastqc_dirpath, cfg.reuse_intermediate] for s in fqc_samples])
+                [work_dir, fqc_s.fastq_fpath, fqc_s.name, fastqc_dirpath, cfg.reuse_intermediate] for fqc_s in fqc_samples])
 
         for fqc_s, fqc_html_fpath in zip(fqc_samples, fastq_reports_fpaths):
-            if not fqc_html_fpath:
-                err('FastQC report for ' + fqc_s.name + ' not found')
-            sample_fastqc_dirpath = join(fastqc_dirpath, fqc_s.name + '_fastqc')
-            if isfile(sample_fastqc_dirpath + '.zip'):
+            if not fqc_html_fpath or not verify_file(fqc_html_fpath):
+                err('FastQC report for ' + fqc_s.name + ' ' + str(fqc_html_fpath) + ' not found')
+            else:
+                fqc_s.fastqc_html_fpath = fqc_html_fpath
+
+            fqc_s.fastqc_dirpath = join(fastqc_dirpath, fqc_s.name + '_fastqc')
+            if not verify_dir(fqc_s.fastqc_dirpath):
+                err('FastQC results directory for ' + fqc_s.name + ' ' + fqc_s.fastqc_dirpath + ' not found')
+                fqc_s.fastqc_dirpath = None
+
+            if isfile(fqc_s.fastqc_dirpath + '.zip'):
                 try:
-                    os.remove(sample_fastqc_dirpath + '.zip')
+                    os.remove(fqc_s.fastqc_dirpath + '.zip')
                 except OSError:
                     pass
+
+            fastqc_txt_fpath = join(fqc_s.fastqc_dirpath, 'fastqc_data.txt')
+            if not verify_file(fastqc_txt_fpath):
+                err('FastQC txt for ' + fqc_s.name + ' ' + fastqc_txt_fpath + ' not found')
+            fqc_s.fastqc_txt_fpath = fastqc_txt_fpath
 
 
 def __prepare_analysis_directory(work_dir, project_name, project_dirpath, samples):

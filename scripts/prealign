@@ -330,6 +330,7 @@ def main():
             os.symlink(project_dir, new_project_symlink)
 
         # Creating analysis directory
+        # TODO: output_dir and analysis dir should be the same. Make a correct symlink to connect ds and analysis
         __prepare_analysis_directory(work_dir, project.az_project_name, project_dir, samples)
 
         # Making project-level report

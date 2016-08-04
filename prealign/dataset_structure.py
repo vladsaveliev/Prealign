@@ -240,7 +240,7 @@ class MiSeqStructure(DatasetStructure):
 
             project.set_dirpath(ds_proj_dir, output_proj_dir, az_proj_name)
             for sample in project.sample_by_name.values():
-                sample.source_fastq_dirpath = project.dirpath
+                sample.source_fastq_dirpath = project.ds_dir
                 sample.set_up_out_dirs(project.fastq_dirpath, project.fastqc_dirpath, project.downsample_targqc_dirpath, work_dir)
 
         self.basecall_stat_html_reports = []
@@ -277,7 +277,7 @@ class HiSeq4000Structure(DatasetStructure):
             #     az_project_name += '_' + pname.replace(' ', '_').replace('-', '_').replace('.', '_')
             project.set_dirpath(ds_proj_dir, proj_output_dir, az_proj_name)
             for sample in project.sample_by_name.values():
-                sample.source_fastq_dirpath = project.dirpath
+                sample.source_fastq_dirpath = project.ds_dir
                 sample.set_up_out_dirs(project.fastq_dirpath, project.fastqc_dirpath, project.downsample_targqc_dirpath, work_dir)
 
         self.basecall_stat_html_reports = self.__get_basecall_stats_reports()
@@ -319,7 +319,7 @@ class NextSeq500Structure(DatasetStructure):
 
             project.set_dirpath(self.unaligned_dirpath, output_proj_dir, az_proj_name)
             for sample in project.sample_by_name.values():
-                sample.source_fastq_dirpath = project.dirpath
+                sample.source_fastq_dirpath = project.ds_dir
                 sample.set_up_out_dirs(project.fastq_dirpath, project.fastqc_dirpath, project.downsample_targqc_dirpath, work_dir)
 
         self.basecall_stat_html_reports = self.__get_basecall_stats_reports()

@@ -92,3 +92,5 @@ ENV/
 
 .Rhistory
 
+test_data/
+test_data/analysis/

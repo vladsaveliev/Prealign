@@ -16,6 +16,9 @@ The following script detects the sequencing projects and samples from the Sample
 
 ### Usage
 ```
+module load java
+module load fastqc
+module load targqc  # loads python virtual environment
 module load preproc
 preproc \
    /ngs/oncology/datasets/HiSeq/150612_D00443_0168_AHMNFGADXX \

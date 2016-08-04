@@ -34,7 +34,6 @@ dedup = True
 
 reuse_intermediate = False
 is_debug = False
-parallel_cfg = None
 sys_cfg = None
 
 

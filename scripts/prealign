@@ -124,7 +124,8 @@ def proc_opts():
         (['-t', '--nt', '--threads'], dict(
             dest='threads',
             type='int',
-            help='Number of threads'
+            help='Number of threads',
+            default=30
          )),
         (['--reuse'], dict(
             dest='reuse_intermediate',
@@ -231,10 +232,10 @@ def proc_opts():
     cfg.sys_cfg['resources'] = cfg.sys_cfg.get('resources', opts.scheduler)
 
     tag = ('preproc_' + opts.project_name) if opts.project_name else 'preproc'
-    cfg.parallel_cfg = ParallelCfg(cfg.sys_cfg['scheduler'], cfg.sys_cfg['queue'],
-                                   cfg.sys_cfg['resources'], opts.threads, tag)
+    parallel_cfg = ParallelCfg(cfg.sys_cfg['scheduler'], cfg.sys_cfg['queue'],
+                               cfg.sys_cfg['resources'], opts.threads, tag)
 
-    return dataset_dirpath, output_dir, work_dir, jira_url, opts.project_name, samplesheet, bed_fpath, hiseq4000_conf
+    return dataset_dirpath, output_dir, work_dir, jira_url, opts.project_name, samplesheet, bed_fpath, hiseq4000_conf, parallel_cfg
 
 
 def read_hiseq4000_conf(conf_fpath):
@@ -300,17 +301,17 @@ def main():
 
     for project in ds.project_by_name.values():
         samples = project.sample_by_name.values()
-        threads = len(samples)
-        info('Threads number: ' + str(threads))
         project.concat_fastqs(ds.get_fastq_regexp_fn)
 
         read_pairs_num_by_sample = dict()
         if Steps.fastqc:
             info('Making FastQC reports')
             safe_mkdir(project.fastqc_dirpath)
-            make_fastqc_reports(work_dir, samples, project.fastq_dirpath, project.fastqc_dirpath, project.comb_fastqc_fpath)
+            make_fastqc_reports(work_dir, samples, project.fastq_dirpath, project.fastqc_dirpath, project.comb_fastqc_fpath,
+                                parallel_cfg)
             for s in samples:
-                read_pairs_num_by_sample[s.name] = get_read_pairs_num_from_fastqc(s.l_fqc_sample.fastqc_txt_fpath)
+                if s.l_fqc_sample:
+                    read_pairs_num_by_sample[s.name] = get_read_pairs_num_from_fastqc(s.l_fqc_sample.fastqc_txt_fpath)
 
         if Steps.targqc:
             info('Running TargQC for downsamled reads')
@@ -448,13 +449,17 @@ def run_targqc(work_dir, project, samples, bed_fpath, read_pairs_num_by_sample):
     # return summarize_targqc(cnf, 1, targqc_dirpath, samples, bed_fpath, exons_bed)
 
 
-def run_fastqc(work_dir, fastq_fpath, output_basename, fastqc_dirpath, need_downsample=True):
+def run_fastqc(work_dir, fastq_fpath, output_basename, fastqc_dirpath, reuse=False):
+    from Utils.file_utils import verify_file, safe_mkdir, which
+    from Utils.logger import debug
+    from Utils.call_process import run
+    from os.path import join, isfile
     fastqc = which('fastqc')
     java = which('java')
     tmp_dirpath = join(work_dir, 'FastQC_' + output_basename + '_tmp')
     safe_mkdir(tmp_dirpath)
     fastq_html_fpath = join(fastqc_dirpath, output_basename + '_fastqc', 'fastqc_report.html')
-    if cfg.reuse_intermediate and isfile(fastq_html_fpath) and verify_file(fastq_html_fpath):
+    if reuse and isfile(fastq_html_fpath) and verify_file(fastq_html_fpath):
         debug(fastq_html_fpath + ' exists, reusing')
         return fastq_html_fpath
     cmdline_l = '{fastqc} --dir {tmp_dirpath} --extract -o {fastqc_dirpath} -f fastq -j {java} {fastq_fpath}'.format(**locals())
@@ -523,10 +528,10 @@ class FQC_Sample:
                 return None
 
 
-def make_fastqc_reports(work_dir, samples, fastq_dirpath, fastqc_dirpath, comb_fastqc_fpath):
+def make_fastqc_reports(work_dir, samples, fastq_dirpath, fastqc_dirpath, comb_fastqc_fpath, parallel_cfg):
     fastqc = which('fastqc')
     if not fastqc:
-        err('FastQC is not found, cannot make reports')
+        err('fastqc is not found, cannot make reports')
         return None
 
     else:
@@ -538,7 +543,7 @@ def make_fastqc_reports(work_dir, samples, fastq_dirpath, fastqc_dirpath, comb_f
             s.r_fqc_sample = FQC_Sample(fqc_sample_name=s.r_fastqc_base_name, fastq_fpath=s.r_fpath, sample=s)
             fqc_samples.extend([s.l_fqc_sample, s.r_fqc_sample])
 
-        with parallel_view(len(fqc_samples), cfg.parallel_cfg, work_dir) as view:
+        with parallel_view(len(fqc_samples), parallel_cfg, work_dir) as view:
             fastq_reports_fpaths = view.run(run_fastqc, [
                 [work_dir, fqc_s.fastq_fpath, fqc_s.name, fastqc_dirpath, cfg.reuse_intermediate] for fqc_s in fqc_samples])
 

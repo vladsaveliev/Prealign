@@ -183,7 +183,7 @@ def proc_opts():
     if opts.work_dir:
         cfg.is_debug = logger.is_debug = True
     output_dir, work_dir = set_up_dirs('prealign', output_dir=dataset_dirpath, work_dir=opts.work_dir,
-                                       log_dir=opts.log_dir, reuse_intermediate=opts.reuse_intermediate)
+                                       log_dir=opts.log_dir, reuse=opts.reuse_intermediate)
     try:
         subprocess.call(['chmod', '-R', '777', work_dir])
     except OSError:
@@ -386,14 +386,13 @@ def run_targqc(work_dir, project, samples, bed_fpath):
                              l_fpath=s.l_fpath,
                              r_fpath=s.r_fpath)
                for s in samples]
-    targqc.start_targqc(work_dir, samples, target,
-                        parallel_cfg=cfg.parallel_cfg,
-                        bwa_prefix=cfg.sys_cfg['genome']['bwa'],
+    targqc.start_targqc(work_dir, samples, target, cfg.parallel_cfg, cfg.sys_cfg['genome']['bwa'],
                         genome=cfg.genome,
                         downsample_pairs_num=cfg.downsample_pairs_num,
                         dedup=cfg.dedup,
                         reuse=cfg.reuse_intermediate,
                         is_debug=cfg.is_debug)
+    
     summarize_targqc(cfg.parallel_cfg.threads, project.downsample_targqc_dirpath,
                             targqc_work_dir, samples, bed_fpath=bed_fpath)
 

@@ -270,7 +270,7 @@ def parse_jira_case(jira_url):
 
 
 def main():
-    project_dir, output_dir, work_dir, jira_url, project_name, samplesheet, bed_fpath, hiseq4000_conf = proc_opts()
+    project_dir, output_dir, work_dir, jira_url, project_name, samplesheet, bed_fpath, hiseq4000_conf, parallel_cfg = proc_opts()
     prjname_by_subprj, jira_by_subprj, bed_by_subprj = {'': project_name or ''}, {'': jira_url}, {'': bed_fpath}
     if hiseq4000_conf:
         prjname_by_subprj, jira_by_subprj, bed_by_subprj = read_hiseq4000_conf(hiseq4000_conf)
@@ -316,7 +316,7 @@ def main():
         if Steps.targqc:
             info('Running TargQC for downsamled reads')
             bed_fpath = bed_by_subprj.get(project.name, bed_by_subprj.values()[0] if bed_by_subprj.values() else None)
-            run_targqc(work_dir, project, samples, bed_fpath, read_pairs_num_by_sample)
+            run_targqc(work_dir, project, samples, bed_fpath, read_pairs_num_by_sample, parallel_cfg)
 
         if Steps.metamapping:
             info()
@@ -386,7 +386,7 @@ def run_metamapping(samples, output_dirpath):
 
 
 
-def run_targqc(work_dir, project, samples, bed_fpath, read_pairs_num_by_sample):
+def run_targqc(work_dir, project, samples, bed_fpath, read_pairs_num_by_sample, parallel_cfg):
     targqc_work_dir = join(work_dir, 'targqc')
 
     # target = Target(work_dir, cfg.fai_fpath, cfg.reuse_intermediate, bed_fpath)
@@ -401,7 +401,7 @@ def run_targqc(work_dir, project, samples, bed_fpath, read_pairs_num_by_sample):
                              l_fpath=s.l_fpath,
                              r_fpath=s.r_fpath)
                for s in samples]
-    targqc.start_targqc(work_dir, samples, target, cfg.parallel_cfg, cfg.sys_cfg['genome']['bwa'],
+    targqc.start_targqc(work_dir, samples, target, parallel_cfg, cfg.sys_cfg['genome']['bwa'],
                         genome=cfg.genome,
                         downsample_pairs_num=cfg.downsample_pairs_num,
                         dedup=cfg.dedup,
@@ -409,7 +409,7 @@ def run_targqc(work_dir, project, samples, bed_fpath, read_pairs_num_by_sample):
                         is_debug=cfg.is_debug,
                         num_reads_by_sample=read_pairs_num_by_sample)
 
-    summarize_targqc(cfg.parallel_cfg.threads, project.downsample_targqc_dirpath,
+    summarize_targqc(parallel_cfg.threads, project.downsample_targqc_dirpath,
                             targqc_work_dir, samples, bed_fpath=bed_fpath)
 
     # cmdl = (('targqc ' + ' '.join(s.l_fpath + ' ' + s.r_fpath for s in samples) +

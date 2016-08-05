@@ -394,23 +394,21 @@ def run_targqc(work_dir, project, samples, bed_fpath, read_pairs_num_by_sample, 
     # start_targqc(work_dir, samples, target)
 
     fai_fpath = ref.get_fai(cfg.genome)
-    target = Target(work_dir, fai_fpath, cfg.reuse_intermediate, bed_fpath, genome=cfg.genome)
     samples = [targqc.Sample(s.name,
                              dirpath=safe_mkdir(join(project.downsample_targqc_dirpath, s.name)),
                              work_dir=safe_mkdir(join(targqc_work_dir, s.name)),
                              l_fpath=s.l_fpath,
                              r_fpath=s.r_fpath)
                for s in samples]
-    targqc.start_targqc(work_dir, samples, target, parallel_cfg, cfg.sys_cfg['genome']['bwa'],
+    targqc.start_targqc(targqc_work_dir, project.downsample_targqc_dirpath, samples, bed_fpath,
+                        parallel_cfg, cfg.sys_cfg['genome']['bwa'],
+                        fai_fpath=fai_fpath,
                         genome=cfg.genome,
                         downsample_pairs_num=cfg.downsample_pairs_num,
                         dedup=cfg.dedup,
                         reuse=cfg.reuse_intermediate,
                         is_debug=cfg.is_debug,
                         num_pairs_by_sample=read_pairs_num_by_sample)
-
-    summarize_targqc(parallel_cfg.threads, project.downsample_targqc_dirpath,
-                            targqc_work_dir, samples, bed_fpath=bed_fpath)
 
     # cmdl = (('targqc ' + ' '.join(s.l_fpath + ' ' + s.r_fpath for s in samples) +
     #     ' --work-dir {targqc_work_dir} --project-name {project.name} ' +

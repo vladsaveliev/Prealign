@@ -356,7 +356,7 @@ def main():
         subj = project.project_report_html_fpath or project.name
         txt = 'Preproc finished for ' + project.name + '\n'
         txt += '\n'
-        txt += 'Path: ' + project.dirpath + '\n'
+        txt += 'Path: ' + project.ds_dir + '\n'
         txt += 'Report: ' + str(html_report_url) + '\n'
         if jira_url:
             txt += 'Jira: ' + jira_url
@@ -407,7 +407,7 @@ def run_targqc(work_dir, project, samples, bed_fpath, read_pairs_num_by_sample, 
                         dedup=cfg.dedup,
                         reuse=cfg.reuse_intermediate,
                         is_debug=cfg.is_debug,
-                        num_reads_by_sample=read_pairs_num_by_sample)
+                        num_pairs_by_sample=read_pairs_num_by_sample)
 
     summarize_targqc(parallel_cfg.threads, project.downsample_targqc_dirpath,
                             targqc_work_dir, samples, bed_fpath=bed_fpath)

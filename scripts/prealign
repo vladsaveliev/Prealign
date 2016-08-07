@@ -27,7 +27,7 @@ import prealign.config as cfg
 from prealign import config
 from prealign.dataset_structure import DatasetStructure
 from prealign.jira_utils import retrieve_jira_info
-from prealign.webserver.exposing import sync_with_ngs_server
+from prealign.webserver.exposing import sync_with_ngs_server, convert_gpfs_path_to_url
 
 
 class Steps:
@@ -149,8 +149,8 @@ def proc_opts():
               "Supports SGE, Torque, LSF and SLURM "
               "parameters."),
             default=[],
-            action="append")),
-
+            action="append"
+         )),
         (['--no-dedup'], dict(
             dest='no_dedup',
             action='store_true',
@@ -340,18 +340,20 @@ def main():
         cmdl = 'multiqc -f ' + output_dir + ' -o ' + output_dir
         run(cmdl)
 
-        # Exposing
-        info()
-        info('Syncing with the NGS webserver')
-        html_report_url = sync_with_ngs_server(
-            work_dir,
-            jira_url=jira_by_subprj.get(project.name, jira_by_subprj.values()[0] if jira_by_subprj.values() else 'unreached'),
-            project_name=project.az_project_name,
-            sample_names=[s.name for s in samples],
-            dataset_dirpath=project_dir,
-            summary_report_fpath=project.project_report_html_fpath,
-            jira_case=jira_case_by_subprj.get(project.name, jira_case_by_subprj.values()[0] if jira_case_by_subprj.values() else None)
-        )
+        if Steps.expose:
+            info()
+            info('Syncing with the NGS webserver')
+            html_report_url = sync_with_ngs_server(
+                work_dir,
+                jira_url=jira_by_subprj.get(project.name, jira_by_subprj.values()[0] if jira_by_subprj.values() else 'unreached'),
+                project_name=project.az_project_name,
+                sample_names=[s.name for s in samples],
+                preproc_dirpath=output_dir,
+                summary_report_fpath=project.project_report_html_fpath,
+                jira_case=jira_case_by_subprj.get(project.name, jira_case_by_subprj.values()[0] if jira_case_by_subprj.values() else None)
+            )
+        else:
+            html_report_url = convert_gpfs_path_to_url(project.project_report_html_fpathproject.project_report_html_fpath)
 
         subj = project.project_report_html_fpath or project.name
         txt = 'Preproc finished for ' + project.name + '\n'

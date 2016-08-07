@@ -4,7 +4,7 @@ import os
 from os.path import join, isfile, basename, dirname, abspath, isdir, relpath, realpath, pardir
 from traceback import print_exc, format_exc
 from Utils.file_utils import file_transaction, safe_mkdir, adjust_path, verify_file
-from Utils.logger import info, critical, err, is_local, warn
+from Utils.logger import info, critical, err, is_local, warn, debug
 from Utils.utils import is_uk, is_us, is_az, is_sweden
 from prealign.webserver.ssh_utils import connect_to_server
 from prealign.jira_utils import retrieve_jira_info
@@ -56,7 +56,26 @@ local = Location('Local',
     reports_dirpath='/Users/vlad/Sites/reports',
     proper_path_should_contain=['/Dropbox/az/analysis/', '/Dropbox/az/datasets/']
 )
-loc_by_id = dict(us=us, uk=uk, local=local)
+loc_by_id = dict(us=us, uk=uk, sweden=sweden, local=local)
+
+if is_us(): loc = us
+elif is_uk(): loc = uk
+elif is_local(): loc = local
+elif is_sweden(): loc = sweden
+else: loc = None
+
+
+def make_bcbio_report_url(project_name, bcbio_final_dirpath, summary_report_fpath):
+    proj_dirpath_on_server = get_bcbio_dirpath_on_server(project_name)
+    return join(loc.report_url_base,                                          # http://ngs.usbod.astrazeneca.net/reports/
+       relpath(proj_dirpath_on_server, loc.reports_dirpath),         # project_name/dataset/project_name
+       relpath(summary_report_fpath, dirname(bcbio_final_dirpath)))  # final/2015_01_01_project/project.html
+
+def make_prealign_report_url(project_name, preproc_dirpath, summary_report_fpath):
+    proj_dirpath_on_server = get_prealign_dirpath_on_server(project_name)
+    return join(loc.report_url_base,
+       relpath(proj_dirpath_on_server, loc.reports_dirpath),
+       relpath(summary_report_fpath, preproc_dirpath))
 
 
 def sync_with_ngs_server(
@@ -65,45 +84,32 @@ def sync_with_ngs_server(
         project_name,
         sample_names,
         summary_report_fpath,
-        dataset_dirpath=None,
+        preproc_dirpath=None,
         bcbio_final_dirpath=None,
         jira_case=None):
 
-    if is_us(): loc = us
-    elif is_uk(): loc = uk
-    elif is_local(): loc = local
-    elif is_sweden(): loc = sweden
-    else:
-        return None
-
     html_report_url = None
-    if any(p in realpath((bcbio_final_dirpath or dataset_dirpath)) for p in loc.proper_path_should_contain):
-        info('Location is ' + loc.loc_id + ', exposing reports to ' + loc.reports_dirpath)
+    if any(p in realpath((bcbio_final_dirpath or preproc_dirpath)) for p in loc.proper_path_should_contain):
+        debug('Location is ' + loc.loc_id + ', exposing reports to ' + loc.reports_dirpath)
 
         if jira_case is None and jira_case != 'unreached' and is_az() and jira_url:
-            info()
-            info('Getting info from JIRA...')
+            debug()
+            debug('Getting info from JIRA...')
             jira_case = retrieve_jira_info(jira_url)
 
         proj_dirpath_on_server = _symlink_dirs(
-            loc=loc,
             project_name=project_name,
             final_dirpath=bcbio_final_dirpath,
-            dataset_dirpath=dataset_dirpath)
-            # html_report_fpath=summary_report_fpath,
-            # html_report_url=html_report_url)
+            preproc_dirpath=preproc_dirpath)
 
+        if preproc_dirpath:
+            html_report_url = make_prealign_report_url(project_name, bcbio_final_dirpath, summary_report_fpath)
         if bcbio_final_dirpath:
-            html_report_url = join(loc.report_url_base,                                          # http://ngs.usbod.astrazeneca.net/reports/
-                                   relpath(proj_dirpath_on_server, loc.reports_dirpath),         # project_name/dataset/project_name
-                                   relpath(summary_report_fpath, dirname(bcbio_final_dirpath)))  # final/2015_01_01_project/project.html
-        elif dataset_dirpath:
-            html_report_url = join(loc.report_url_base,
-                                   relpath(proj_dirpath_on_server, loc.reports_dirpath),
-                                   relpath(summary_report_fpath, dataset_dirpath))
+            html_report_url = make_bcbio_report_url(project_name, preproc_dirpath, summary_report_fpath)
+        debug('HTML url: ' + html_report_url)
 
         html_report_full_url = join(loc.website_url_base, 'samples.php?project_name=' + project_name + '&file=' + html_report_url)
-        info('HTML url: ' + html_report_full_url)
+        debug('Full HTML url: ' + html_report_full_url)
 
         if verify_file(loc.csv_fpath, 'Project list'):
             write_to_csv_file(
@@ -118,17 +124,24 @@ def sync_with_ngs_server(
     return html_report_url
 
 
-def _symlink_dirs(loc, project_name, final_dirpath, dataset_dirpath):  #, html_report_fpath, html_report_url):
-    info(loc.loc_id + ', symlinking to ' + loc.reports_dirpath)
+def get_bcbio_dirpath_on_server(project_name):
+    return join(loc.reports_dirpath, project_name, 'bcbio', project_name)  # before "final"!
+
+def get_prealign_dirpath_on_server(project_name):
+    return join(loc.reports_dirpath, project_name, 'prealign', project_name)
+
+
+def _symlink_dirs(project_name, final_dirpath, preproc_dirpath):  #, html_report_fpath, html_report_url):
+    debug(loc.loc_id + ', symlinking to ' + loc.reports_dirpath)
     dst_project_dirpath = None
 
-    if dataset_dirpath:
-        dst_project_dirpath = join(loc.reports_dirpath, project_name, 'dataset', project_name)
-        (symlink_to_ngs if is_us() else local_symlink)(dataset_dirpath, dst_project_dirpath)
-
     if final_dirpath:
-        dst_project_dirpath = join(loc.reports_dirpath, project_name, 'bcbio', project_name)  # before "final"!
+        dst_project_dirpath = get_bcbio_dirpath_on_server(project_name)  # before "final"!
         (symlink_to_ngs if is_us() else local_symlink)(dirname(final_dirpath), dst_project_dirpath)
+
+    if preproc_dirpath:
+        dst_project_dirpath = get_prealign_dirpath_on_server(project_name)
+        (symlink_to_ngs if is_us() else local_symlink)(preproc_dirpath, dst_project_dirpath)
 
     return dst_project_dirpath
 
@@ -206,13 +219,13 @@ def symlink_to_ngs(src_path, dst_fpath):
 
 def write_to_csv_file(work_dir, jira_case, project_list_fpath, country_id, project_name,
                       samples_num=None, analysis_dirpath=None, html_report_url=None):
-    info('Reading project list ' + project_list_fpath)
+    debug('Reading project list ' + project_list_fpath)
     with open(project_list_fpath) as f:
         lines = f.readlines()
     uncom_lines = [l.strip() for l in lines if not l.strip().startswith('#')]
 
     header = uncom_lines[0].strip()
-    info('header: ' + header)
+    debug('header: ' + header)
     header_keys = header.split(',')  # 'Updated By,PID,Name,JIRA URL,HTML report path,Why_IfNoReport,Data Hub,Analyses directory UK,Analyses directory US,Type,Division,Department,Sample Number,Reporter,Assignee,Description,IGV,Notes'
     index_of_pid = header_keys.index('PID')
     if index_of_pid == -1: index_of_pid = 1
@@ -228,14 +241,14 @@ def write_to_csv_file(work_dir, jira_case, project_list_fpath, country_id, proje
     with file_transaction(work_dir, project_list_fpath) as tx_fpath:
         if pid not in values_by_keys_by_pid.keys():
             # info(pid + ' not in ' + str(values_by_keys_by_pid.keys()))
-            info('Adding new record for ' + pid)
+            debug('Adding new record for ' + pid)
             values_by_keys_by_pid[pid] = OrderedDict(zip(header_keys, [''] * len(header_keys)))
         else:
-            info('Updating existing record for ' + pid)
+            debug('Updating existing record for ' + pid)
         d = values_by_keys_by_pid[pid]
         for k in header_keys:
             if k not in d:
-                err('Error: ' + k + ' not in ' + project_list_fpath + ' for ' + pid)
+                err('Writing to projects CSV file: Error: ' + k + ' not in ' + project_list_fpath + ' for ' + pid)
 
         d['PID'] = pid
 
@@ -284,14 +297,14 @@ def write_to_csv_file(work_dir, jira_case, project_list_fpath, country_id, proje
                     l = unicode(l, 'utf-8')
                     l_ascii = l.encode('ascii', 'ignore')
                     if ',' + project_name + ',' in l_ascii or ',"' + project_name + '",' in l_ascii:
-                        info('Old csv line: ' + l_ascii)
+                        debug('Old csv line: ' + l_ascii)
                         # f.write('#' + l)
                     else:
                         f.write(l)
             f.write(new_line + '\n')
-        info()
-        info('New line: ' + new_line)
-        info()
+        debug()
+        debug('New line: ' + new_line)
+        debug()
 
 
 def __unquote(s):

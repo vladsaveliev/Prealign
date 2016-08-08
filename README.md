@@ -22,9 +22,9 @@ module load targqc  # loads python virtual environment
 module load preproc
 preproc \
    /ngs/oncology/datasets/HiSeq/150612_D00443_0168_AHMNFGADXX \
+   -o /ngs/oncology/analysis/dev/Dev_0104_HiSeq_DS \
    --genome hg19 \
    [--bed target.bed] \
-   [--project-name Dev_0104_HiSeq_DS]
    [--jira https://jira.rd.astrazeneca.net/browse/NGSG-313]
 ```
 
@@ -45,9 +45,9 @@ preproc \
 
 conf.csv
 ```
-#project_name,desired_project_name,jira_url,bed
-AZ300.Crown_Rerun,Dev_0138_HiSeq4000_CrownModels_Rerun,https://jira.rd.astrazeneca.net/i#browse/NGSG-440,target.bed
-HyperPlus.Alpha_WGS,Dev_0165_HiSeq4000_AKT.WGS3,https://jira.rd.astrazeneca.net/i#browse/NGSG-436,
+#project_name,output_dir,jira_url,bed
+AZ300.Crown_Rerun,/ngs/oncology/analysis/dev/Dev_0138_HiSeq4000_CrownModels_Rerun,https://jira.rd.astrazeneca.net/i#browse/NGSG-440,target.bed
+HyperPlus.Alpha_WGS,/ngs/oncology/analysis/dev/Dev_0165_HiSeq4000_AKT.WGS,https://jira.rd.astrazeneca.net/i#browse/NGSG-436,
 ```
 
 Optionally, you can process a subproject separately by providing the exact subproject path in Unalign:

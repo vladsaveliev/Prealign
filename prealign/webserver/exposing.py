@@ -86,18 +86,19 @@ def sync_with_ngs_server(
         summary_report_fpath,
         preproc_dirpath=None,
         bcbio_final_dirpath=None,
-        jira_case=None):
+        # jira_case=None
+    ):
 
     html_report_url = None
     if any(p in realpath((bcbio_final_dirpath or preproc_dirpath)) for p in loc.proper_path_should_contain):
         debug('Location is ' + loc.loc_id + ', exposing reports to ' + loc.reports_dirpath)
 
-        if jira_case is None and jira_case != 'unreached' and is_az() and jira_url:
-            debug()
-            debug('Getting info from JIRA...')
-            jira_case = retrieve_jira_info(jira_url)
+        # if jira_case is None and jira_case != 'unreached' and is_az() and jira_url:
+        #     debug()
+        #     debug('Getting info from JIRA...')
+        #     jira_case = retrieve_jira_info(jira_url)
 
-        proj_dirpath_on_server = _symlink_dirs(
+        _symlink_dirs(
             project_name=project_name,
             final_dirpath=bcbio_final_dirpath,
             preproc_dirpath=preproc_dirpath)
@@ -114,7 +115,7 @@ def sync_with_ngs_server(
         if verify_file(loc.csv_fpath, 'Project list'):
             write_to_csv_file(
                 work_dir=work_dir,
-                jira_case=jira_case,
+                jira_url=jira_url,
                 project_list_fpath=loc.csv_fpath,
                 country_id=loc.loc_id,
                 project_name=project_name,
@@ -217,7 +218,7 @@ def symlink_to_ngs(src_path, dst_fpath):
     return dst_fpath
 
 
-def write_to_csv_file(work_dir, jira_case, project_list_fpath, country_id, project_name,
+def write_to_csv_file(work_dir, jira_url, project_list_fpath, country_id, project_name,
                       samples_num=None, analysis_dirpath=None, html_report_url=None):
     debug('Reading project list ' + project_list_fpath)
     with open(project_list_fpath) as f:
@@ -259,24 +260,24 @@ def write_to_csv_file(work_dir, jira_case, project_list_fpath, country_id, proje
         if html_report_url and (analysis_dirpath or not __unquote(d['HTML report path'])):  # update only if running after bcbio, or no value there at all
             d['HTML report path'] = html_report_url
 
-        if jira_case:
-            d['JIRA URL'] = jira_case.url
-            # if 'Updated By' in d and __unquote(d['Updated By']):
-            d['Updated By'] = getpass.getuser()
-            if jira_case.description:
-                d['Description'] = jira_case.summary
-            if jira_case.data_hub:
-                d['Data Hub'] = jira_case.data_hub
-            if jira_case.type:
-                d['Type'] = jira_case.type
-            if jira_case.department:
-                d['Department'] = jira_case.department
-            if jira_case.division:
-                d['Division'] = jira_case.division
-            if jira_case.assignee:
-                d['Assignee'] = jira_case.assignee
-            if jira_case.reporter:
-                d['Reporter'] = jira_case.reporter
+        # if jira_case:
+        d['JIRA URL'] = jira_url  #jira_case.url
+            # # if 'Updated By' in d and __unquote(d['Updated By']):
+        d['Updated By'] = getpass.getuser()
+            # if jira_case.description:
+            #     d['Description'] = jira_case.summary
+            # if jira_case.data_hub:
+            #     d['Data Hub'] = jira_case.data_hub
+            # if jira_case.type:
+            #     d['Type'] = jira_case.type
+            # if jira_case.department:
+            #     d['Department'] = jira_case.department
+            # if jira_case.division:
+            #     d['Division'] = jira_case.division
+            # if jira_case.assignee:
+            #     d['Assignee'] = jira_case.assignee
+            # if jira_case.reporter:
+            #     d['Reporter'] = jira_case.reporter
         if samples_num:
             d['Sample Number'] = str(samples_num)
 

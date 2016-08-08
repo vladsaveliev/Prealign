@@ -4,7 +4,7 @@ import os
 import sys
 import datetime
 from optparse import OptionParser, SUPPRESS_HELP
-from os.path import join, isfile, basename, isdir, exists, dirname, splitext, islink
+from os.path import join, isfile, basename, isdir, exists, dirname, splitext, islink, realpath
 from collections import OrderedDict, namedtuple
 import subprocess
 import traceback
@@ -56,8 +56,7 @@ def proc_opts():
         (['-o', '--output-dir'], dict(
             dest='output_dir',
             metavar='DIR',
-            help='Output directory (or directory name in case of bcbio final dir)',
-            default=os.getcwd(),
+            help='Output directory. If there are multiple subprojects, use --conf'
          )),
         (['--project-name'], dict(
             dest='project_name',
@@ -69,7 +68,7 @@ def proc_opts():
         )),
         (['--conf'], dict(
             dest='hiseq4000_conf',
-            help='A csv-file in the form of "subproject_dir_name,sub_project_desired_name,jira_url"',
+            help='A csv-file in the form of "subproject_dir_name,analysis_path,jira_url,target_bed_path"',
         )),
         (['--samplesheet'], dict(
             dest='samplesheet',
@@ -142,7 +141,7 @@ def proc_opts():
             dest='queue',
             help="Scheduler queue to run jobs on, for ipython parallel"
          )),
-        (["-r", "--resources"], dict(
+        (['-r', '--resources'], dict(
             dest='resources',
             help=("Cluster specific resources specifications. "
               "Can be specified multiple times.\n"
@@ -179,20 +178,19 @@ def proc_opts():
     # Reading inputs
     if len(args) < 1:
         critical(usage)
-    dataset_dirpath = verify_dir(args[0], is_critical=True, description='Dataset directory')  # /ngs/oncology/datasets/hiseq/150521_D00443_0159_AHK2KTADXX
+    input_dir = verify_dir(args[0], is_critical=True, description='Dataset directory')  # /ngs/oncology/datasets/hiseq/150521_D00443_0159_AHK2KTADXX or subproject
     if opts.work_dir:
         cfg.is_debug = logger.is_debug = True
-    output_dir, work_dir = set_up_dirs('prealign', output_dir=opts.output_dir, work_dir=opts.work_dir,
-                                       log_dir=opts.log_dir, reuse=opts.reuse_intermediate)
-    try:
-        subprocess.call(['chmod', '-R', '777', work_dir])
-    except OSError:
-        debug(traceback.format_exc())
-        pass
 
-    jira_url = ''
-    if len(args) > 1:
-        jira_url = args[1]
+    output_dir, work_dir = None, None
+    if opts.output_dir:
+        output_dir, work_dir = set_up_dirs('prealign', output_dir=opts.output_dir, work_dir=opts.work_dir,
+                                           log_dir=opts.log_dir, reuse=opts.reuse_intermediate)
+        try:
+            subprocess.call(['chmod', '-R', '777', work_dir])
+        except OSError:
+            debug(traceback.format_exc())
+            pass
 
     samplesheet = None
     if opts.samplesheet:
@@ -201,10 +199,12 @@ def proc_opts():
 
     info(' '.join(sys.argv))
     info()
-    debug('Created a temporary working directory: ' + work_dir)
 
-    if opts.project_name:
-        info('Project name: ' + opts.project_name)
+    project_name = opts.project_name
+    if not project_name and output_dir:
+        project_name = basename(realpath(output_dir))
+    if project_name:
+        info('Project name: ' + project_name)
 
     bed_fpath = None
     if opts.bed:
@@ -228,37 +228,36 @@ def proc_opts():
     cfg.genome = opts.genome
     cfg.sys_cfg = config.load_sys_cfg(opts.genome)
     cfg.sys_cfg['scheduler'] = cfg.sys_cfg.get('scheduler', opts.scheduler)
-    cfg.sys_cfg['queue']     = cfg.sys_cfg.get('queue',     opts.scheduler)
-    cfg.sys_cfg['resources'] = cfg.sys_cfg.get('resources', opts.scheduler)
+    cfg.sys_cfg['queue']     = cfg.sys_cfg.get('queue',     opts.queue)
+    cfg.sys_cfg['resources'] = cfg.sys_cfg.get('resources', opts.resources)
 
-    tag = ('preproc_' + opts.project_name) if opts.project_name else 'preproc'
+    tag = ('preproc_' + project_name) if project_name else 'preproc'
     parallel_cfg = ParallelCfg(cfg.sys_cfg['scheduler'], cfg.sys_cfg['queue'],
                                cfg.sys_cfg['resources'], opts.threads, tag)
 
-    return dataset_dirpath, output_dir, work_dir, jira_url, opts.project_name, samplesheet, bed_fpath, hiseq4000_conf, parallel_cfg
+    return input_dir, output_dir, work_dir, project_name, opts.jira, samplesheet, bed_fpath, hiseq4000_conf, parallel_cfg
 
 
 def read_hiseq4000_conf(conf_fpath):
-    projectname_by_subproject = dict()
-    jira_by_subproject = dict()
+    output_dir_by_subproject = dict()
+    jira_by_subprj = dict()
     bed_by_subproject = dict()
-    if verify_file(conf_fpath, is_critical=True, description='HiSeq4000 jira/subproject configuration file'):
+    if verify_file(conf_fpath, is_critical=True, description='HiSeq4000 subproject configuration file'):
         with open(conf_fpath) as f:
             for i, l in enumerate(f):
                 l = l.strip()
                 if not l.startswith('#'):
                     fs = l.split(',')
                     if not len(fs) == 4:
-                        critical('A line in ' + conf_fpath + ' should contain 4 comma-separated values (empty allowed) '
-                                 '(dirname, project name, jira url, bed path). Malformed line #' + str(i) + ': ' + l)
-                    projectname_by_subproject[fs[0]] = fs[1]
-                    jira_by_subproject[fs[0]] = fs[2]
+                        critical('A line in ' + conf_fpath + ' should contain 3 comma-separated values (empty allowed) '
+                                 '(dirname,output_dir,bed_path). Malformed line #' + str(i) + ': ' + l)
+                    output_dir_by_subproject[fs[0]] = adjust_path(fs[1])
+                    jira_by_subprj[fs[0]] = fs[2]
                     bed_by_subproject[fs[0]] = fs[3]
-    if len(projectname_by_subproject) == 0:
+    if len(output_dir_by_subproject) == 0:
         critical('No records in ' + conf_fpath)
-    assert len(projectname_by_subproject) == len(jira_by_subproject) == len(bed_by_subproject), \
-        str(len(projectname_by_subproject)) + ', ' + str(len(jira_by_subproject) + ', ' + str(len(bed_by_subproject)))
-    return projectname_by_subproject, jira_by_subproject, bed_by_subproject
+    assert len(output_dir_by_subproject) == len(bed_by_subproject), str(len(output_dir_by_subproject)) + ', ' + str(len(bed_by_subproject))
+    return output_dir_by_subproject, jira_by_subprj, bed_by_subproject
 
 
 def parse_jira_case(jira_url):
@@ -270,33 +269,33 @@ def parse_jira_case(jira_url):
 
 
 def main():
-    project_dir, output_dir, work_dir, jira_url, project_name, samplesheet, bed_fpath, hiseq4000_conf, parallel_cfg = proc_opts()
-    prjname_by_subprj, jira_by_subprj, bed_by_subprj = {'': project_name or ''}, {'': jira_url}, {'': bed_fpath}
+    input_dir, output_dir, work_dir, project_name, jira_url, samplesheet, bed_fpath, hiseq4000_conf, parallel_cfg = proc_opts()
+    output_dir_by_subproject, jira_by_subprj, bed_by_subprj = {'': output_dir or ''}, {'': jira_url}, {'': bed_fpath}
     if hiseq4000_conf:
-        prjname_by_subprj, jira_by_subprj, bed_by_subprj = read_hiseq4000_conf(hiseq4000_conf)
+        output_dir_by_subproject, jira_by_subprj, bed_by_subprj = read_hiseq4000_conf(hiseq4000_conf)
 
-    jira_case_by_subprj = dict()
-    for subprj, jira_url in jira_by_subprj.items():
-        jira_case_by_subprj[subprj] = parse_jira_case(jira_url)
-        if not prjname_by_subprj[subprj] and jira_case_by_subprj[subprj]:
-            prjname_by_subprj[subprj] = jira_case_by_subprj[subprj].project_name
-            info('Setting project name from JIRA: ' + prjname_by_subprj[subprj])
-        if not prjname_by_subprj[subprj]:
-            critical('Cannot parse JIRA url ' + str(jira_url) +
-               ', and project name is not specified in the config or command line. Please, provide a project name.')
-        prjname_by_subprj[subprj] = prjname_by_subprj[subprj].replace(' ', '_')
-        info('Project name and JIRA URL for "' + subprj + '": ' + prjname_by_subprj[subprj] + ', ' + str(jira_url))
+    # jira_case_by_subprj = dict()
+    # for subprj, jira_url in jira_by_subprj.items():
+    #     # jira_case_by_subprj[subprj] = parse_jira_case(jira_url)
+    #     if not output_dir_by_subproject[subprj] and jira_case_by_subprj[subprj]:
+    #         prjname_by_subprj[subprj] = jira_case_by_subprj[subprj].project_name
+    #         info('Setting project name from JIRA: ' + prjname_by_subprj[subprj])
+    #     if not prjname_by_subprj[subprj]:
+    #         critical('Cannot parse JIRA url ' + str(jira_url) +
+    #            ', and project name is not specified in the config or command line. Please, provide a project name.')
+    #     prjname_by_subprj[subprj] = prjname_by_subprj[subprj].replace(' ', '_')
+    #     info('Project name and JIRA URL for "' + subprj + '": ' + prjname_by_subprj[subprj] + ', ' + str(jira_url))
 
     info()
     info('*' * 60)
-    ds = DatasetStructure.create(work_dir, project_dir, output_dir, prjname_by_subprj, samplesheet)
+    ds = DatasetStructure.create(work_dir, input_dir, output_dir_by_subproject, samplesheet)  # TODO: make work without az_prjname_by_subprj
     if not ds.project_by_name:
         critical('Error: no projects found')
     info('Projects: ' + ', '.join([p.name + ' (' + ', '.join(p.sample_by_name) + ')' for p in ds.project_by_name.values()]))
     for project in ds.project_by_name.values():
         if not project.sample_by_name:
             critical('Error: no samples for project ' + project.name + ' found')
-        if len(ds.project_by_name) > 1 and project.name not in jira_case_by_subprj:
+        if len(ds.project_by_name) > 1 and project.name not in output_dir_by_subproject:
             critical('Error: ' + project.name + 'could not be found in config ' + str(hiseq4000_conf))
 
     for project in ds.project_by_name.values():
@@ -324,23 +323,27 @@ def main():
             safe_mkdir(ds.downsample_metamapping_dirpath)
             run_metamapping(samples, project.downsample_metamapping_dirpath)
 
-        new_project_symlink = join(dirname(project_dir), project.az_project_name)
+        # TODO: get ds_root_dir from ds; Symlink in root_dir; but pass project_dir to __prepare_analysis_directory
+        new_project_symlink = join(dirname(realpath(project.output_dir)), project.az_project_name)
         if not exists(new_project_symlink):
             info()
-            info('Creating symlink in Datasets now called as project-name: ' + project_dir + ' -> ' + new_project_symlink)
-            os.symlink(project_dir, new_project_symlink)
+            info('Creating symlink in Datasets (' + dirname(new_project_symlink) + ') called ' + basename(new_project_symlink) + ' pointing to ' + project.output_dir)
+            try:
+                os.symlink(realpath(project.output_dir), new_project_symlink)
+            except OSError as e:
+                info('Could not create symlink to Analysis in Datasets (' + str(e) + '), skipping.')
 
         # Creating analysis directory
-        # TODO: output_dir and analysis dir should be the same. Make a correct symlink to connect ds and analysis
-        __prepare_analysis_directory(work_dir, project.az_project_name, project_dir, samples)
+        __prepare_analysis_directory(work_dir, output_dir, project.output_dir, samples)
 
         # Making project-level report
         # make_project_level_report(cnf, dataset_structure=ds, dataset_project=project)
-        info('Making MultiQC reports')
-        cmdl = 'multiqc -f ' + output_dir + ' -o ' + output_dir
-        run(cmdl)
+        info()
+        info('*' * 70)
+        info('Making MultiQC report')
+        __make_multiqc(project)
 
-        if Steps.expose:
+        if is_az() and Steps.expose:
             info()
             info('Syncing with the NGS webserver')
             html_report_url = sync_with_ngs_server(
@@ -349,11 +352,11 @@ def main():
                 project_name=project.az_project_name,
                 sample_names=[s.name for s in samples],
                 preproc_dirpath=output_dir,
-                summary_report_fpath=project.project_report_html_fpath,
-                jira_case=jira_case_by_subprj.get(project.name, jira_case_by_subprj.values()[0] if jira_case_by_subprj.values() else None)
+                summary_report_fpath=project.multiqc_report_html_fpath,
+                # jira_case=jira_case_by_subprj.get(project.name, jira_case_by_subprj.values()[0] if jira_case_by_subprj.values() else None)
             )
         else:
-            html_report_url = convert_gpfs_path_to_url(project.project_report_html_fpathproject.project_report_html_fpath)
+            html_report_url = convert_gpfs_path_to_url(project.project_report_html_fpath)
 
         subj = project.project_report_html_fpath or project.name
         txt = 'Preproc finished for ' + project.name + '\n'
@@ -364,13 +367,29 @@ def main():
             txt += 'Jira: ' + jira_url
         send_email(txt, subj)
 
-    info()
-    info('*' * 70)
+        info()
+        info('Finished processing project ' + project.name)
+        info('  Dataset location:')
+        info('    ' + project.ds_dir)
+        info('  Merged FastQ and pre-alignment results location:')
+        info('    ' + output_dir)
+        info('  Report:')
+        if html_report_url:
+            info('    ' + html_report_url)
+        else:
+            info('    ' + project.multiqc_report_html_fpath)
+
     # if not cnf.debug and cnf.work_dir:
     #     try:
     #         shutil.rmtree(cnf.work_dir)
     #     except OSError:
     #         err('Can\'t remove work directory ' + cnf.work_dir + ', please, remove it manually.')
+
+
+def __make_multiqc(project):
+    cmdl = 'multiqc -f ' + project.output_dir + ' -o ' + project.output_dir
+    run(cmdl)
+    verify_file(project.multiqc_report_html_fpath, is_critical=True, description='MultiQC report for ' + project.name)
 
 
 def get_read_pairs_num_from_fastqc(l_fastqc_txt_fpath):
@@ -385,7 +404,6 @@ def get_read_pairs_num_from_fastqc(l_fastqc_txt_fpath):
 
 def run_metamapping(samples, output_dirpath):
     info('Running MetaMapping for downsampled BAMs: not implemented')
-
 
 
 def run_targqc(work_dir, project, samples, bed_fpath, read_pairs_num_by_sample, parallel_cfg):
@@ -570,26 +588,20 @@ def make_fastqc_reports(work_dir, samples, fastq_dirpath, fastqc_dirpath, comb_f
             fqc_s.fastqc_txt_fpath = fastqc_txt_fpath
 
 
-def __prepare_analysis_directory(work_dir, project_name, project_dirpath, samples):
-    kind = next((kind for pref, kind in cfg.project_kind_by_prefix.items() if project_name.startswith(pref)), None)
-    if kind:
-        analysis_proj_dirpath = adjust_path(join(adjust_path(project_dirpath).split('/Datasets/')[0], 'Analysis', kind, project_name))
-        if not exists(analysis_proj_dirpath):
-            info('Analysis directory ' + analysis_proj_dirpath + ' does not exist. Creating and preparing...')
-            safe_mkdir(analysis_proj_dirpath)
+def __prepare_analysis_directory(work_dir, output_dir, project_dir, samples):
+    if '/ngs/oncology/analysis/' in output_dir.lower():
+        bcbio_csv_fpath = join(output_dir, 'bcbio.csv')
+        if not isfile(bcbio_csv_fpath):
+            with file_transaction(work_dir, bcbio_csv_fpath) as tx:
+                with open(tx, 'w') as f:
+                    f.write('samplename,description,batch,phenotype\n')
+                    for s in samples:
+                        f.write(s.name + ',' + s.name + ',' + s.name + '-batch,tumor\n')
 
-            bcbio_csv_fpath = join(analysis_proj_dirpath, 'bcbio.csv')
-            if not isfile(bcbio_csv_fpath):
-                with file_transaction(work_dir, bcbio_csv_fpath) as tx:
-                    with open(tx, 'w') as f:
-                        f.write('samplename,description,batch,phenotype\n')
-                        for s in samples:
-                            f.write(s.name + ',' + s.name + ',' + s.name + '-batch,tumor\n')
-
-        ds_symlink = join(analysis_proj_dirpath, 'dataset')
-        if isdir(analysis_proj_dirpath) and not exists(ds_symlink):
-            info('Creating symlink in analysis to datasets: ' + project_dirpath + ' -> ' + ds_symlink)
-            os.symlink(project_dirpath, ds_symlink)
+    ds_symlink = join(output_dir, 'dataset')
+    if isdir(output_dir) and isdir(project_dir) and not exists(ds_symlink):
+        info('Creating symlink ' + basename(ds_symlink) + ' in analysis ' + dirname(output_dir) + ' pointing to datasets: ' + project_dir)
+        os.symlink(project_dir, ds_symlink)
 
 
 if __name__ == '__main__':

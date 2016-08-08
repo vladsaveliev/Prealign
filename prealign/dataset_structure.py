@@ -2,13 +2,13 @@ from collections import OrderedDict, defaultdict
 from itertools import dropwhile
 import re
 import os
-from os.path import join, isfile, isdir, basename, exists, dirname
+from os.path import join, isfile, isdir, basename, exists, dirname, realpath
 import shutil
 import traceback
 import targqc
 
 import prealign.config as cfg
-from Utils.logger import critical, err, info, warn
+from Utils.logger import critical, err, info, warn, debug
 from Utils.file_utils import verify_dir, verify_file, splitext_plus, safe_mkdir, file_transaction
 
 
@@ -34,37 +34,37 @@ class DatasetStructure:
     downsample_targqc_repr = 'TargQC downsampled'
 
     @staticmethod
-    def create(work_dir, ds_dir, output_dir, az_prjname_by_subprj, samplesheet=None):
-        if 'datasets/miseq/' in ds_dir.lower():
-            return MiSeqStructure(work_dir, ds_dir, output_dir, az_prjname_by_subprj, samplesheet)
+    def create(work_dir, input_dir, output_dir_by_subproject, samplesheet=None):
+        if 'datasets/miseq/' in input_dir.lower():
+            return MiSeqStructure(work_dir, input_dir, output_dir_by_subproject, samplesheet)
 
-        elif 'datasets/hiseq/' in ds_dir.lower():
-            return HiSeqStructure(work_dir, ds_dir, output_dir, az_prjname_by_subprj, samplesheet)
+        elif 'datasets/hiseq/' in input_dir.lower():
+            return HiSeqStructure(work_dir, input_dir, output_dir_by_subproject, samplesheet)
 
-        elif 'datasets/hiseq4000/' in ds_dir.lower():
-            return HiSeq4000Structure(work_dir, ds_dir, output_dir, az_prjname_by_subprj, samplesheet)
+        elif 'datasets/hiseq4000/' in input_dir.lower():
+            return HiSeq4000Structure(work_dir, input_dir, output_dir_by_subproject, samplesheet)
 
-        elif 'datasets/nextseq500' in ds_dir.lower():
-            return NextSeq500Structure(work_dir, ds_dir, output_dir, az_prjname_by_subprj, samplesheet)
+        elif 'datasets/nextseq500' in input_dir.lower():
+            return NextSeq500Structure(work_dir, input_dir, output_dir_by_subproject, samplesheet)
 
         else:
-            critical('Directory must be datasets/miseq/, datasets/nextseq500, datasets/hiseq/, or datasets/hiseq4000/. Found ' + ds_dir)
+            critical('Directory must be datasets/miseq/, datasets/nextseq500, datasets/hiseq/, or datasets/hiseq4000/. Found ' + input_dir)
 
-    def __init__(self, work_dir, ds_dir, output_dir, az_prjname_by_subprj, samplesheet=None):
-        self.az_prjname_by_subprj = az_prjname_by_subprj
+    def __init__(self, work_dir, input_dir, output_dir_by_subproject, samplesheet=None):
+        self.output_dir_by_subproject = output_dir_by_subproject
 
         illumina_project_name = None
-        if '/Unalign/' in ds_dir:
-            self.ds_dir = ds_dir.split('/Unalign/')[0]
+        if '/Unalign/' in input_dir:
+            self.illumina_dir = input_dir.split('/Unalign/')[0]
             self.unaligned_dirpath = self.__find_unaligned_dir()
             verify_dir(self.unaligned_dirpath, description='Unalign dir', is_critical=True)
-            illumina_project_name = ds_dir.split('/Unalign/')[1]  # something like AURA.FFPE.AZ300, in contast with project_name which is something like Bio_123_AURA_FFPE_AZ300
+            illumina_project_name = input_dir.split('/Unalign/')[1]  # something like AURA.FFPE.AZ300, in contast with project_name which is something like Bio_123_AURA_FFPE_AZ300
             info('Processing sub-project ' + illumina_project_name)
         else:
-            self.ds_dir = ds_dir
+            self.illumina_dir = input_dir
             self.unaligned_dirpath = self.__find_unaligned_dir()
 
-        self.basecalls_dirpath = join(self.ds_dir, 'Data/Intensities/BaseCalls')
+        self.basecalls_dirpath = join(self.illumina_dir, 'Data/Intensities/BaseCalls')
         verify_dir(self.basecalls_dirpath, is_critical=True)
 
         self.bcl2fastq_dirpath = None
@@ -84,7 +84,7 @@ class DatasetStructure:
                 self.project_by_name = {illumina_project_name: self.project_by_name[illumina_project_name]}
 
     def __find_unaligned_dir(self):
-        unaligned_dirpath = join(self.ds_dir, 'Unalign')
+        unaligned_dirpath = join(self.illumina_dir, 'Unalign')
         if verify_dir(unaligned_dirpath, description='"Unalign" directory', silent=True):
             unaligned_dirpath = unaligned_dirpath
         else:
@@ -93,7 +93,7 @@ class DatasetStructure:
         return unaligned_dirpath
 
     def __find_sample_sheet(self):
-        ss_fpath = join(self.ds_dir, 'SampleSheet.csv')
+        ss_fpath = join(self.illumina_dir, 'SampleSheet.csv')
         if not isfile(ss_fpath):
             ss_fpath = join(self.basecalls_dirpath, 'SampleSheet.csv')
         verify_file(ss_fpath, description='Sample sheet', is_critical=True)
@@ -149,12 +149,27 @@ class DatasetStructure:
 
         return project_by_name
 
+    def _get_output_dir(self, output_dir_by_subproject, pname):
+        output_dir = None
+        if isinstance(output_dir_by_subproject, basestring):
+            output_dir = output_dir_by_subproject
+        elif pname in output_dir_by_subproject:
+            output_dir = output_dir_by_subproject[pname]
+        elif len(self.project_by_name) > 1:
+            critical('Error: cannot correspond subproject ' + pname + ' and lines in the conf. '
+                 'Please, follow the SOP for multiple-project run: http://wiki.rd.astrazeneca.net/display/NG/SOP+-+Pre+Processing+QC+Reporting')
+        else:
+            output_dir = output_dir_by_subproject.values()[0]
+        safe_mkdir(output_dir)
+        az_proj_name = basename(realpath(output_dir))
+        return output_dir, az_proj_name
+
 
 class HiSeqStructure(DatasetStructure):
-    def __init__(self, work_dir, ds_dir, output_dir, az_prjname_by_subprj=None, samplesheet=None):
+    def __init__(self, work_dir, input_dir, output_dir_by_subproject, samplesheet=None):
         info('Parsing the HiSeq project structure')
         self.kind = 'hiseq'
-        DatasetStructure.__init__(self, work_dir, ds_dir, output_dir, az_prjname_by_subprj, samplesheet=samplesheet)
+        DatasetStructure.__init__(self, work_dir, input_dir, output_dir_by_subproject, samplesheet=samplesheet)
 
         verify_dir(self.unaligned_dirpath, is_critical=True)
 
@@ -163,16 +178,9 @@ class HiSeqStructure(DatasetStructure):
         for pname, project in self.project_by_name.items():
             ds_proj_dir = join(self.unaligned_dirpath, 'Project_' + pname.replace(' ', '-'))  #.replace('-', '_').replace('.', '_'))
 
-            az_proj_name = az_prjname_by_subprj.get(pname) if not isinstance(az_prjname_by_subprj, basestring) else az_prjname_by_subprj
-            if az_proj_name is None:
-                if len(self.project_by_name) > 1:
-                    warn('Warn: cannot correspond subproject ' + pname + ' and project names and JIRA cases. '
-                         'Please, follow the SOP for multiple-project run: http://wiki.rd.astrazeneca.net/display/NG/SOP+-+Pre+Processing+QC+Reporting')
-                    continue
-                az_proj_name = az_prjname_by_subprj.values()[0]
-            output_proj_dir = safe_mkdir(join(output_dir, az_proj_name))
+            output_dir, az_proj_name = self._get_output_dir(output_dir_by_subproject, pname)
 
-            project.set_dirpath(ds_proj_dir, output_proj_dir, az_proj_name)
+            project.set_dirpath(ds_proj_dir, output_dir, az_proj_name)
             for sname, sample in project.sample_by_name.items():
                 sample.source_fastq_dirpath = join(project.ds_dir, 'Sample_' + sname.replace(' ', '-'))  #.replace('-', '_').replace('.', '_'))
                 sample.set_up_out_dirs(project.fastq_dirpath, project.fastqc_dirpath, project.downsample_targqc_dirpath, work_dir)
@@ -214,10 +222,10 @@ class HiSeqStructure(DatasetStructure):
 
 
 class MiSeqStructure(DatasetStructure):
-    def __init__(self, work_dir, ds_dir, output_dir, az_prjname_by_subprj, samplesheet=None):
+    def __init__(self, work_dir, input_dir, output_dir_by_subproject, samplesheet=None):
         info('Parsing the MiSeq project structure')
         self.kind = 'miseq'
-        DatasetStructure.__init__(self, work_dir, ds_dir, output_dir, az_prjname_by_subprj, samplesheet=samplesheet)
+        DatasetStructure.__init__(self, work_dir, input_dir, output_dir_by_subproject, samplesheet=samplesheet)
 
         base_dirpath = self.unaligned_dirpath
         if not verify_dir(base_dirpath, silent=True):
@@ -229,16 +237,9 @@ class MiSeqStructure(DatasetStructure):
             if not verify_dir(ds_proj_dir, silent=True):
                 ds_proj_dir = base_dirpath
 
-            az_proj_name = az_prjname_by_subprj.get(pname) if not isinstance(az_prjname_by_subprj, basestring) else az_prjname_by_subprj
-            if az_proj_name is None:
-                if len(self.project_by_name) > 1:
-                    warn('Warn: cannot correspond subproject ' + pname + ' and project names and JIRA cases. '
-                         'Please, follow the SOP for multiple-project run: http://wiki.rd.astrazeneca.net/display/NG/SOP+-+Pre+Processing+QC+Reporting')
-                    continue
-                az_proj_name = az_prjname_by_subprj.values()[0]
-            output_proj_dir = safe_mkdir(join(output_dir, az_proj_name))
+            output_dir, az_proj_name = self._get_output_dir(output_dir_by_subproject, pname)
 
-            project.set_dirpath(ds_proj_dir, output_proj_dir, az_proj_name)
+            project.set_dirpath(ds_proj_dir, output_dir, az_proj_name)
             for sample in project.sample_by_name.values():
                 sample.source_fastq_dirpath = project.ds_dir
                 sample.set_up_out_dirs(project.fastq_dirpath, project.fastqc_dirpath, project.downsample_targqc_dirpath, work_dir)
@@ -255,27 +256,19 @@ class MiSeqStructure(DatasetStructure):
 
 
 class HiSeq4000Structure(DatasetStructure):
-    def __init__(self, work_dir, ds_dir, output_dir, az_prjname_by_subprj, samplesheet=None):
+    def __init__(self, work_dir, input_dir, output_dir_by_subproject, samplesheet=None):
         info('Parsing the HiSeq4000 project structure')
         self.kind = 'hiseq4000'
-        DatasetStructure.__init__(self, work_dir, ds_dir, output_dir, az_prjname_by_subprj, samplesheet=samplesheet)
+        DatasetStructure.__init__(self, work_dir, input_dir, output_dir_by_subproject, samplesheet=samplesheet)
 
         verify_dir(self.unaligned_dirpath, is_critical=True)
 
         for pname, project in self.project_by_name.items():
             ds_proj_dir = join(self.unaligned_dirpath, pname)
 
-            az_proj_name = az_prjname_by_subprj.get(pname) if not isinstance(az_prjname_by_subprj, basestring) else az_prjname_by_subprj
-            if az_proj_name is None:
-                if len(self.project_by_name) > 1:
-                    warn('Warn: cannot correspond subproject ' + pname + ' and project names and JIRA cases. '
-                         'Please, follow the SOP for multiple-project run: http://wiki.rd.astrazeneca.net/display/NG/SOP+-+Pre+Processing+QC+Reporting')
-                    continue
-                az_proj_name = az_prjname_by_subprj.values()[0]
-            proj_output_dir = safe_mkdir(join(output_dir, az_proj_name))
-            # if len(self.project_by_name) > 1:
-            #     az_project_name += '_' + pname.replace(' ', '_').replace('-', '_').replace('.', '_')
-            project.set_dirpath(ds_proj_dir, proj_output_dir, az_proj_name)
+            output_dir, az_proj_name = self._get_output_dir(output_dir_by_subproject, pname)
+
+            project.set_dirpath(ds_proj_dir, output_dir, az_proj_name)
             for sample in project.sample_by_name.values():
                 sample.source_fastq_dirpath = project.ds_dir
                 sample.set_up_out_dirs(project.fastq_dirpath, project.fastqc_dirpath, project.downsample_targqc_dirpath, work_dir)
@@ -294,30 +287,23 @@ class HiSeq4000Structure(DatasetStructure):
     def __get_basecall_stats_reports(self):
         self.basecalles_reports_dirpath = join(self.unaligned_dirpath, 'Reports', 'html')
         index_html_fpath = join(self.basecalles_reports_dirpath, 'index.html')
-        if verify_dir(self.ds_dir) and verify_file(index_html_fpath):
+        if verify_dir(self.illumina_dir) and verify_file(index_html_fpath):
             return [index_html_fpath]
 
 
 class NextSeq500Structure(DatasetStructure):
-    def __init__(self, work_dir, ds_dir, output_dir, az_prjname_by_subprj, samplesheet=None):
+    def __init__(self, work_dir, input_dir, output_dir_by_subproject, samplesheet=None):
         info('Parsing the NextSeq500 project structure')
         self.kind = 'nextseq500'
-        DatasetStructure.__init__(self, work_dir, ds_dir, output_dir, az_prjname_by_subprj, samplesheet=samplesheet)
-        info('az_prjname_by_subprj: ' + str(az_prjname_by_subprj))
+        DatasetStructure.__init__(self, work_dir, input_dir, output_dir_by_subproject, samplesheet=samplesheet)
+        debug('output_dir_by_subproject: ' + str(output_dir_by_subproject))
 
         verify_dir(self.unaligned_dirpath, is_critical=True)
 
         for pname, project in self.project_by_name.items():
-            az_proj_name = az_prjname_by_subprj.get(pname) if not isinstance(az_prjname_by_subprj, basestring) else az_prjname_by_subprj
-            if az_proj_name is None:
-                if len(self.project_by_name) > 1:
-                    warn('Warn: cannot correspond subproject ' + pname + ' and project names and JIRA cases. '
-                         'Please, follow the SOP for multiple-project run: http://wiki.rd.astrazeneca.net/display/NG/SOP+-+Pre+Processing+QC+Reporting')
-                    continue
-                az_proj_name = az_prjname_by_subprj.values()[0]
-            output_proj_dir = safe_mkdir(join(output_dir, az_proj_name))
+            output_dir, az_proj_name = self._get_output_dir(output_dir_by_subproject, pname)
 
-            project.set_dirpath(self.unaligned_dirpath, output_proj_dir, az_proj_name)
+            project.set_dirpath(self.unaligned_dirpath, output_dir, az_proj_name)
             for sample in project.sample_by_name.values():
                 sample.source_fastq_dirpath = project.ds_dir
                 sample.set_up_out_dirs(project.fastq_dirpath, project.fastqc_dirpath, project.downsample_targqc_dirpath, work_dir)
@@ -364,7 +350,7 @@ class DatasetProject:
 
         self.comb_fastqc_fpath = join(self.fastqc_dirpath, 'FastQC.html')
         self.downsample_targqc_report_fpath = None
-        self.project_report_html_fpath = None
+        self.multiqc_report_html_fpath = join(self.output_dir, 'multiqc_report.html')
 
         self.downsample_metamapping_dirpath = join(self.output_dir, 'Downsample_MetaMapping')
         self.downsample_targqc_dirpath = join(self.output_dir, 'Downsample_TargQC')

@@ -104,9 +104,9 @@ def sync_with_ngs_server(
             preproc_dirpath=preproc_dirpath)
 
         if preproc_dirpath:
-            html_report_url = make_prealign_report_url(project_name, bcbio_final_dirpath, summary_report_fpath)
+            html_report_url = make_prealign_report_url(project_name, preproc_dirpath, summary_report_fpath)
         if bcbio_final_dirpath:
-            html_report_url = make_bcbio_report_url(project_name, preproc_dirpath, summary_report_fpath)
+            html_report_url = make_bcbio_report_url(project_name, bcbio_final_dirpath, summary_report_fpath)
         debug('HTML url: ' + html_report_url)
 
         html_report_full_url = join(loc.website_url_base, 'samples.php?project_name=' + project_name + '&file=' + html_report_url)

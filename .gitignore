@@ -94,3 +94,5 @@ ENV/
 
 test_data/
 test_data/analysis/
+
+.DS_Store

@@ -1,9 +1,0 @@
-downsample_pairs_num: 5e5
-genome: none
-fai_fpath: none
-dedup: true
-
-reuse_intermediate: false
-is_debug: false
-
-parallel_cfg: None

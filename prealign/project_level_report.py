@@ -7,10 +7,12 @@ from os.path import join, relpath, dirname, basename, abspath, getmtime, isfile
 from collections import OrderedDict
 from collections import defaultdict
 
-from Utils.call_process import run
-from Utils.logger import info, step_greetings, warn
-from Utils.file_utils import verify_file, add_suffix, verify_dir, file_transaction
-from Utils.reporting import Metric, Record, MetricStorage, ReportSection, SampleReport, FullReport, write_static_html_report
+from ngs_utils.call_process import run
+from ngs_utils.logger import info, step_greetings, warn
+from ngs_utils.file_utils import verify_file, add_suffix, verify_dir, file_transaction
+from ngs_utils.reporting.reporting import Metric, Record, MetricStorage, ReportSection, SampleReport, FullReport, write_static_html_report
+
+from pip._vendor.requests.packages.urllib3.packages import six
 
 BASECALLS_NAME        = 'BaseCalls'
 FASTQC_NAME           = 'FastQC'
@@ -455,7 +457,7 @@ def add_dna_sample_records(s, individual_reports_section, bcbio_structure, base_
 def _relpath_all(value, base_dirpath):
     if not value:
         return None
-    if isinstance(value, str):
+    if isinstance(value, six.string_types):
         return relpath(value, base_dirpath)
     elif isinstance(value, dict):
         for k in value.keys():
@@ -486,7 +488,7 @@ def _save_static_html(cnf, full_report, html_fpath, project_name, bcbio_structur
     def __process_record(rec, short=False):
         d = rec.__dict__.copy()
 
-        if isinstance(rec.url, basestring):
+        if isinstance(rec.url, six.string_types):
             d['contents'] = '<a href="' + rec.url + '">' + rec.value + '</a>'
 
         elif isinstance(rec.url, dict):
@@ -621,11 +623,6 @@ def get_run_info(cnf, bcbio_structure, dataset_project):
     # else:
     #     run_info_dict["filtering_params"] = 'default'
     return run_info_dict
-
-
-def get_oncoprints_link(cnf, bcbio_structure, project_name):
-    oncoprints_link = create_oncoprints_link(cnf, bcbio_structure, project_name)
-    return oncoprints_link
 
 
 def _make_relative_link_record(name, match_name, metric):
